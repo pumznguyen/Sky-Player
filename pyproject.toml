@@ -1,0 +1,20 @@
+[project]
+name = "sky-player"
+version = "0.1.0"
+description = "Sky Music Player"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "prompt-toolkit>=3.0.52",
+]
+
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = ["main", "songs", "ui", "inputs", "scheduler"]
+
+[project.scripts]
+play = "main:main"
