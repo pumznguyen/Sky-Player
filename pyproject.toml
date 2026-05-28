@@ -14,7 +14,8 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-py-modules = ["main", "songs", "ui", "inputs", "scheduler"]
+py-modules = ["main", "songs", "ui", "inputs", "scheduler", "build_app"]
 
 [project.scripts]
 play = "main:main"
+build-app = "build_app:main"
