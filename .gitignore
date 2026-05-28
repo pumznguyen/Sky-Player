@@ -31,3 +31,8 @@ $RECYCLE.BIN/
 
 # Local User Configurations
 config.json
+
+# PyInstaller Build Artifacts
+build/
+dist/
+*.spec
