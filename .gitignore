@@ -36,3 +36,7 @@ config.json
 build/
 dist/
 *.spec
+
+# Packaging Metadata
+*.egg-info/
+

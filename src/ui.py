@@ -190,7 +190,7 @@ class ProgressRenderer:
         fraction = current / total
         time_text = f"{format_duration(current)}/{format_duration(total)}"
         status_text = status.upper().replace("_", " ")
-        controls_hint = self.controls.hint() if self.controls is not None else ""
+        controls_hint = ""
 
         max_song_length = max(12, min(34, terminal_width // 3))
         song_label = truncate_text(song_name, max_song_length)

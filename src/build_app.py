@@ -4,10 +4,13 @@ import sys
 from pathlib import Path
 
 def main():
-    print("[+] Đang kiểm tra và cài đặt pyinstaller...")
-    # Cài đặt pyinstaller vào môi trường hiện tại
-    subprocess.run([sys.executable, "-m", "pip", "install", "pyinstaller"], check=True)
-    
+    if sys.platform == 'win32':
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
     print("[+] Đang dọn dẹp các thư mục build cũ...")
     for folder in ["build", "dist"]:
         path = Path(folder)

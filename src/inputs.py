@@ -218,6 +218,7 @@ def get_process_name_by_pid(pid):
 
 def get_sky_window():
     found_window = wintypes.HWND()
+    rejected_candidates = []
 
     def enum_window_callback(hwnd, _lparam):
         if not user32.IsWindowVisible(hwnd):
@@ -240,16 +241,8 @@ def get_sky_window():
             if not EXPECTED_PROCESS_NAMES or ALLOW_TITLE_FALLBACK:
                 found_window.value = hwnd
                 return False
-            if hwnd not in REJECTED_WINDOW_WARNINGS:
-                REJECTED_WINDOW_WARNINGS.add(hwnd)
-                print(
-                    f"Rejected Sky-like window (untrusted process): Title={title!r}, "
-                    f"PID={pid.value}, ProcessName={proc_name!r}"
-                )
-                print(
-                    "If this is your actual game window, rerun with "
-                    "--allow-title-fallback or set --sky-process-names correctly."
-                )
+            
+            rejected_candidates.append((hwnd, title, pid.value, proc_name))
             if PLAYBACK_DEBUG:
                 debug_log(
                     f"[window] rejected candidate: title={title!r}, "
@@ -262,15 +255,26 @@ def get_sky_window():
     user32.EnumWindows(callback, 0)
     res = found_window.value or None
     if res is not None:
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(res, ctypes.byref(pid))
-        proc_name = get_process_name_by_pid(pid.value)
-        title_len = user32.GetWindowTextLengthW(res)
-        title_buf = ctypes.create_unicode_buffer(title_len + 1)
-        user32.GetWindowTextW(res, title_buf, title_len + 1)
-        print(f"Detected Sky window: Title='{title_buf.value}', PID={pid.value}, ProcessName='{proc_name}'")
         if PLAYBACK_DEBUG:
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(res, ctypes.byref(pid))
+            proc_name = get_process_name_by_pid(pid.value)
+            title_len = user32.GetWindowTextLengthW(res)
+            title_buf = ctypes.create_unicode_buffer(title_len + 1)
+            user32.GetWindowTextW(res, title_buf, title_len + 1)
             debug_log(f"Detected Sky window: Title='{title_buf.value}', PID={pid.value}, ProcessName='{proc_name}'")
+    else:
+        for hwnd, title, pid_val, proc_name in rejected_candidates:
+            if hwnd not in REJECTED_WINDOW_WARNINGS:
+                REJECTED_WINDOW_WARNINGS.add(hwnd)
+                print(
+                    f"Rejected Sky-like window (untrusted process): Title={title!r}, "
+                    f"PID={pid_val}, ProcessName={proc_name!r}"
+                )
+                print(
+                    "If this is your actual game window, rerun with "
+                    "--allow-title-fallback or set --sky-process-names correctly."
+                )
     return res
 
 def is_sky_window_valid():
