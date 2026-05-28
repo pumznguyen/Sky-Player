@@ -28,6 +28,8 @@ If you already have Python installed on your system:
 2. **Run the App:**
    ```bash
    python src/main.py
+   # Or using the quick script:
+   .\play.bat
    ```
 
 ---
@@ -39,8 +41,12 @@ If you use [uv](https://github.com/astral-sh/uv) for fast, isolated Python virtu
 1. **Run directly:**
    ```bash
    uv run play
+   # Or using the quick script:
+   .\play.bat
    ```
-   *(Or double-click `play.bat` on Windows)*
+
+> [!TIP]
+> **Quick Start Scripts:** Both `.\play.bat` (Windows) and `./play` (Linux/macOS) are smart! They will automatically detect if `uv` is installed to run the app, and seamlessly fall back to standard `python` if it isn't.
 
 ---
 

@@ -1,2 +1,6 @@
 #!/bin/sh
-uv run python src/main.py "$@"
+if command -v uv >/dev/null 2>&1; then
+    uv run python src/main.py "$@"
+else
+    python src/main.py "$@"
+fi
