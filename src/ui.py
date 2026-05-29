@@ -195,9 +195,38 @@ def truncate_text(text: str, max_length: int) -> str:
     return text[: max_length - 1] + "…"
 
 class ProgressRenderer:
-    def __init__(self, controls: PlaybackControls | None = None) -> None:
+    def __init__(
+        self,
+        controls: PlaybackControls | None = None,
+        verbose: bool = False,
+        profile_name: str = "balanced",
+        tempo_scale: float = 1.0,
+    ) -> None:
         self.controls = controls
+        self.verbose = verbose
+        self.profile_name = profile_name
+        self.tempo_scale = tempo_scale
         self.last_render_at: float = 0.0
+        # Live timing counters updated by PlaybackEngine
+        self.late_2ms: int = 0
+        self.late_5ms: int = 0
+        self.late_10ms: int = 0
+        self.max_lateness_us: int = 0
+        self._verbose_initialized: bool = False
+
+    def update_counters(self, lateness_us: int) -> None:
+        """Called by PlaybackEngine after each key action to update live timing counters."""
+        if lateness_us > 10000:
+            self.late_10ms += 1
+            self.late_5ms += 1
+            self.late_2ms += 1
+        elif lateness_us > 5000:
+            self.late_5ms += 1
+            self.late_2ms += 1
+        elif lateness_us > 2000:
+            self.late_2ms += 1
+        if lateness_us > self.max_lateness_us:
+            self.max_lateness_us = lateness_us
 
     def render(self, current: float, total: float, song_name: str, status: str = "playing", force: bool = False) -> None:
         now = time.perf_counter()
@@ -210,33 +239,65 @@ class ProgressRenderer:
         current = min(max(current, 0.0), total)
         fraction = current / total
         time_text = f"{format_duration(current)}/{format_duration(total)}"
-        status_text = status.upper().replace("_", " ")
+        if status == "panic":
+            status_text = "PANIC REL"
+        else:
+            status_text = status.upper().replace("_", " ")
         controls_hint = ""
         if status == "focus_lost" and self.controls is not None:
             controls_hint = f"Press {self.controls.refocus.display} to refocus Sky"
 
         max_song_length = max(12, min(34, terminal_width // 3))
         song_label = truncate_text(song_name, max_song_length)
-        hint = f" | {controls_hint}" if controls_hint else ""
+
+        # Build profile/tempo suffix for compact and verbose modes
+        profile_hint = f"{self.profile_name} {self.tempo_scale:.2f}x"
+
+        if controls_hint:
+            hint = f" | {controls_hint}"
+        else:
+            hint = ""
 
         fixed_length = len(status_text) + len(song_label) + len(time_text) + len(hint) + 6
         bar_width = max(10, min(36, terminal_width - fixed_length))
 
         filled = min(bar_width, int(round(fraction * bar_width)))
         bar = "█" * filled + "░" * (bar_width - filled)
-        line = f"{status_text:<10} {song_label} [{bar}] {time_text}{hint}"
+        line1 = f"{status_text:<10} {song_label} [{bar}] {time_text}{hint}"
 
-        if len(line) > terminal_width:
-            line = f"{status_text:<10} {song_label} [{bar}] {time_text}"
-        if len(line) > terminal_width:
-            overflow = len(line) - terminal_width
+        # Try to append profile/tempo suffix if space allows (compact and verbose share this)
+        line1_with_profile = f"{line1} | {profile_hint}"
+        if len(line1_with_profile) <= terminal_width:
+            line1 = line1_with_profile
+
+        if len(line1) > terminal_width:
+            line1 = f"{status_text:<10} {song_label} [{bar}] {time_text}"
+        if len(line1) > terminal_width:
+            overflow = len(line1) - terminal_width
             song_label = truncate_text(song_label, max(8, len(song_label) - overflow - 1))
-            line = f"{status_text:<10} {song_label} [{bar}] {time_text}"
+            line1 = f"{status_text:<10} {song_label} [{bar}] {time_text}"
 
-        print("\r\033[K" + line, end="", flush=True)
+        if self.verbose:
+            line2 = (
+                f"           Late >2ms:{self.late_2ms} "
+                f">5ms:{self.late_5ms} "
+                f">10ms:{self.late_10ms}  "
+                f"max:{self.max_lateness_us}\u00b5s"
+            )
+            if self._verbose_initialized:
+                output = f"\033[1A\r\033[K{line1}\n\r\033[K{line2}"
+            else:
+                output = f"{line1}\n{line2}"
+                self._verbose_initialized = True
+            print(output, end="", flush=True)
+        else:
+            print("\r\033[K" + line1, end="", flush=True)
 
     def finish(self, message: str) -> None:
-        print("\r\033[K" + message, flush=True)
+        if self.verbose and self._verbose_initialized:
+            print(f"\033[1A\r\033[K\r\033[K" + message, flush=True)
+        else:
+            print("\r\033[K" + message, flush=True)
 
 def clear_terminal() -> None:
     os.system('cls' if os.name == 'nt' else 'clear')

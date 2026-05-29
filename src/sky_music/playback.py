@@ -184,7 +184,10 @@ class PlaybackEngine:
                         late_events_over_5ms += 1
                     if lateness_us > 10000:
                         late_events_over_10ms += 1
-                        
+
+                if self.renderer and hasattr(self.renderer, 'update_counters'):
+                    self.renderer.update_counters(max(0, lateness_us))
+
                 # Record telemetry logs
                 self.telemetry.record(
                     event_index=idx,

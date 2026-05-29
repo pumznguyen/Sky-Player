@@ -5,6 +5,7 @@ from pathlib import Path
 
 # Import từ các mô-đun chuyên biệt
 import inputs
+from sky_music.config import load_config, save_config, apply_config_defaults
 from inputs import (
     enable_high_precision_timers,
     disable_high_precision_timers,
@@ -40,6 +41,7 @@ TELEMETRY_CSV_ENABLED = False
 DRY_RUN_MODE = False
 TEMPO_SCALE = 1.0
 TIMING_PROFILE_NAME = "balanced"
+VERBOSE_HUD = False
 
 def init_debug_log() -> None:
     global DEBUG_LOG_PATH, DEBUG_START_PERF
@@ -294,7 +296,12 @@ def play_selected_song(selected_song: Path, countdown_seconds: int, controls: Pl
         print(f"[simulation] DRY-RUN enabled. Simulating playback of {song.name}...")
 
     backend = DryRunBackend() if is_dry_run else WinSendInputBackend()
-    renderer = ProgressRenderer(controls)
+    renderer = ProgressRenderer(
+        controls,
+        verbose=VERBOSE_HUD,
+        profile_name=current_profile,
+        tempo_scale=current_tempo,
+    )
     
     engine = PlaybackEngine(
         song=song,
@@ -313,170 +320,199 @@ def play_selected_song(selected_song: Path, countdown_seconds: int, controls: Pl
     return result
 
 
-
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         description="Play Sky song files from the terminal.",
     )
-    parser.add_argument(
+
+    # ── Song Selection ────────────────────────────────────────────────────────
+    sel = parser.add_argument_group("Song selection")
+    sel.add_argument(
         "--song",
         help="play a song by number, exact name, partial name, or file path",
     )
-    parser.add_argument(
+    sel.add_argument(
         "--list",
         action="store_true",
         help="list available songs and exit",
     )
-    parser.add_argument(
+    sel.add_argument(
         "--songs-dir",
         type=Path,
         default=SONG_DIR,
         help="folder containing .json/.skysheet files",
     )
-    parser.add_argument(
+    sel.add_argument(
         "--countdown",
         type=int,
         default=3,
-        help="seconds to wait before playback starts",
+        help="seconds to wait before playback starts (default: 3)",
     )
-    parser.add_argument(
+    sel.add_argument(
         "--repeat",
         type=int,
         default=1,
-        help="number of times to repeat the selected song",
     )
-    parser.add_argument(
-        "--no-clear",
-        action="store_true",
-        help="do not clear the terminal after each song",
-    )
-    parser.add_argument(
-        "--doctor",
-        action="store_true",
-        help="run complete clinical diagnostic system check",
-    )
-    parser.add_argument(
-        "--doctor-timing",
-        action="store_true",
-        help="diagnose high-precision multimedia timers on Windows",
-    )
-    parser.add_argument(
-        "--doctor-input",
-        action="store_true",
-        help="diagnose layout configurations and active depressed note keys conflicts",
-    )
-    parser.add_argument(
-        "--debug-playback",
-        action="store_true",
-        help="write playback timing details to logs/",
-    )
-    parser.add_argument(
-        "--pause-key",
-        default="f8",
-        help="global hotkey to pause/resume playback, e.g. f8 or ctrl+p",
-    )
-    parser.add_argument(
-        "--skip-key",
-        default="f9",
-        help="global hotkey to skip the current song and return to song selection",
-    )
-    parser.add_argument(
-        "--quit-key",
-        default="f10",
-        help="global hotkey to stop playback and exit (default: f10)",
-    )
-    parser.add_argument(
-        "--refocus-key",
-        default="f6",
-        help="global hotkey to bring Sky back to the foreground",
-    )
-    parser.add_argument(
-        "--panic-key",
-        default="ctrl+alt+backspace",
-        help="global hotkey to immediately release all keys without stopping playback (default: ctrl+alt+backspace)",
-    )
-    parser.add_argument(
-        "--disable-hotkeys",
-        action="store_true",
-        help="disable runtime hotkeys and only use Ctrl+C to stop",
-    )
-    parser.add_argument(
-        "--allow-note-hotkeys",
-        action="store_true",
-        help="allow single-key hotkeys that overlap with note keys such as p; not recommended",
-    )
-    parser.add_argument(
-        "--scan-code-mode",
-        choices=["physical", "mapped"],
-        default="physical",
-        help="physical = fixed QWERTY scan codes, mapped = OS keyboard layout",
-    )
-    parser.add_argument(
-        "--sky-process-names",
-        default="Sky.exe,Sky Children of the Light.exe",
-        help="comma-separated expected Sky executable names",
-    )
-    parser.add_argument(
-        "--allow-title-fallback",
-        action="store_true",
-        help="allow title matching when process verification fails",
-    )
-    parser.add_argument(
-        "--theme",
-        choices=["aurora", "minimalist", "slate", "cyberpunk", "classic"],
-        default=None,
-        help="TUI selection menu theme: aurora, minimalist, slate, cyberpunk, or classic (Default: saved or aurora)",
-    )
-    parser.add_argument(
+    # ── Playback Timing ───────────────────────────────────────────────────────
+    timing = parser.add_argument_group("Playback timing")
+    timing.add_argument(
         "--timing-profile",
         choices=["fast", "balanced", "conservative", "local-precise", "remote-safe", "dense-safe"],
         default="balanced",
-        help="Select timing profile: local-precise, remote-safe, dense-safe, fast, balanced, conservative (Default: balanced)",
+        help=(
+            "Timing profile: "
+            "local-precise (low latency), "
+            "remote-safe (listener quality), "
+            "dense-safe (many chords/repeats), "
+            "fast (experimental), "
+            "balanced (default), "
+            "conservative (safe/slower)"
+        ),
     )
-    parser.add_argument(
+    timing.add_argument(
         "--tempo-scale",
         type=float,
         default=1.0,
-        help="Scale playback tempo dynamically (e.g. 1.2 = 1.2x speed, 0.8 = 0.8x speed; Default: 1.0)",
+        help="Scale playback tempo: 1.2 = 20%% faster, 0.8 = 20%% slower (default: 1.0)",
     )
-    parser.add_argument(
+    timing.add_argument(
         "--hold-ms",
         type=int,
-        help="Override key hold duration (in milliseconds)",
+        help="Override key hold duration in ms (overrides profile)",
     )
-    parser.add_argument(
+    timing.add_argument(
         "--min-hold-ms",
         type=int,
-        help="Override absolute minimum key hold duration (in milliseconds)",
+        help="Override minimum key hold duration in ms (overrides profile)",
     )
-    parser.add_argument(
+    timing.add_argument(
         "--release-gap-ms",
         type=int,
-        help="Override release gap (in milliseconds)",
+        help="Override release gap in ms (overrides profile)",
     )
-    parser.add_argument(
+    timing.add_argument(
         "--repeat-release-gap-ms",
         type=int,
-        help="Override gap before same-key repeats (in milliseconds)",
+        help="Override same-key repeat gap in ms (overrides profile)",
     )
-    parser.add_argument(
+    timing.add_argument(
+        "--scan-code-mode",
+        choices=["physical", "mapped"],
+        default="physical",
+        help="physical = fixed QWERTY scan codes (default), mapped = OS keyboard layout",
+    )
+
+    # ── Runtime Controls ──────────────────────────────────────────────────────
+    ctrl = parser.add_argument_group("Runtime controls (hotkeys during playback)")
+    ctrl.add_argument(
+        "--pause-key",
+        default="f8",
+        help="pause/resume hotkey, e.g. f8 or ctrl+p (default: f8)",
+    )
+    ctrl.add_argument(
+        "--skip-key",
+        default="f9",
+        help="skip current song hotkey (default: f9)",
+    )
+    ctrl.add_argument(
+        "--quit-key",
+        default="f10",
+        help="quit playback hotkey (default: f10; Esc not recommended — game may intercept it)",
+    )
+    ctrl.add_argument(
+        "--refocus-key",
+        default="f6",
+        help="bring Sky window to foreground hotkey (default: f6)",
+    )
+    ctrl.add_argument(
+        "--panic-key",
+        default="ctrl+alt+backspace",
+        help="emergency release all keys without stopping playback (default: ctrl+alt+backspace)",
+    )
+    ctrl.add_argument(
+        "--disable-hotkeys",
+        action="store_true",
+        help="disable all runtime hotkeys; use Ctrl+C only",
+    )
+    ctrl.add_argument(
+        "--allow-note-hotkeys",
+        action="store_true",
+        help="allow hotkeys that overlap with note keys (not recommended)",
+    )
+
+    # ── Safety & Diagnostics ──────────────────────────────────────────────────
+    diag = parser.add_argument_group("Safety and diagnostics")
+    diag.add_argument(
+        "--doctor",
+        action="store_true",
+        help="run full readiness check (Sky window, timers, layout, key conflicts)",
+    )
+    diag.add_argument(
+        "--doctor-timing",
+        action="store_true",
+        help="check high-precision multimedia timer subsystem only",
+    )
+    diag.add_argument(
+        "--doctor-input",
+        action="store_true",
+        help="check keyboard layout mapping and physically held note keys only",
+    )
+    diag.add_argument(
+        "--sky-process-names",
+        default="Sky.exe,Sky Children of the Light.exe",
+        help="comma-separated Sky executable names to match (default: Sky.exe,...)",
+    )
+    diag.add_argument(
+        "--allow-title-fallback",
+        action="store_true",
+        help="allow window title matching when process verification fails",
+    )
+
+    # ── Telemetry ─────────────────────────────────────────────────────────────
+    telem = parser.add_argument_group("Telemetry")
+    telem.add_argument(
         "--debug-csv",
         action="store_true",
-        help="Write high-precision timing CSV telemetry reports to logs/",
+        help="write per-event timing CSV + summary JSON to logs/ after each playback",
     )
-    parser.add_argument(
+    telem.add_argument(
+        "--debug-playback",
+        action="store_true",
+        help="write verbose playback debug log to logs/",
+    )
+    telem.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run playback purely inside mock memory, without sending physical OS keystrokes (useful for timing diagnosis)",
+        help="simulate playback in memory without sending any keystrokes (timing diagnosis)",
     )
-    parser.add_argument(
+    telem.add_argument(
         "--inspect-telemetry",
-        help="Summarize timing performance from telemetry summary JSON or directory of JSONs and exit",
+        help="read and summarize telemetry from a .summary.json file or logs/ directory and exit",
     )
+
+    # ── Display ───────────────────────────────────────────────────────────────
+    disp = parser.add_argument_group("Display")
+    disp.add_argument(
+        "--theme",
+        choices=["aurora", "minimalist", "slate", "cyberpunk", "classic"],
+        default=None,
+        help="song picker TUI theme (default: saved or aurora)",
+    )
+    disp.add_argument(
+        "--no-clear",
+        action="store_true",
+        help="do not clear the terminal between songs",
+    )
+    disp.add_argument(
+        "--verbose-hud",
+        action="store_true",
+        help="show detailed live timing/backend stats during playback (2-line HUD)",
+    )
+
     return parser
 
 def configure_from_args(args: argparse.Namespace) -> None:
-    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME
+    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
     import inputs
     import songs
     from sky_music.scheduler import TimingPolicy
@@ -489,6 +525,7 @@ def configure_from_args(args: argparse.Namespace) -> None:
     DRY_RUN_MODE = args.dry_run
     TEMPO_SCALE = args.tempo_scale
     TIMING_PROFILE_NAME = args.timing_profile
+    VERBOSE_HUD = args.verbose_hud
 
     if PLAYBACK_DEBUG:
         init_debug_log()
@@ -629,6 +666,11 @@ def main() -> int:
 
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    # P4: Load user config and apply saved defaults (CLI flags override these)
+    user_cfg = load_config()
+    apply_config_defaults(args, user_cfg)
+
     configure_from_args(args)
     try:
         controls = build_playback_controls(args)
@@ -646,14 +688,14 @@ def main() -> int:
             doctor.run_all_doctor_checks()
         elif args.doctor_timing:
             print("=" * 60)
-            print("             SKY TIMING DOCTOR")
+            print("         SKY MUSIC PLAYER — TIMING CHECK")
             print("=" * 60)
             diag = doctor.check_timer_resolution()
             print(f"Status: {'OK' if diag['ok'] else 'FAILED'}\nDetails: {diag['msg']}")
             print("=" * 60)
         elif args.doctor_input:
             print("=" * 60)
-            print("             SKY INPUT DOCTOR")
+            print("         SKY MUSIC PLAYER — INPUT CHECK")
             print("=" * 60)
             kb_diag = doctor.check_keyboard_layout()
             conflict_diag = doctor.check_physical_keys_held()
