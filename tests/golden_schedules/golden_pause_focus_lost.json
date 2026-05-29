@@ -1,0 +1,50 @@
+[
+    {
+        "at_us": 0,
+        "scan_codes": [
+            21
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 20000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    },
+    {
+        "at_us": 100000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 120000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    },
+    {
+        "at_us": 200000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 220000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    }
+]

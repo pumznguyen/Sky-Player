@@ -1,55 +1,32 @@
-from dataclasses import dataclass
-from typing import Literal
-from sky_music.domain import Song, InstrumentProfile, ScanCode
-from sky_music.layouts import SKY_15_KEY_PROFILE, PHYSICAL_SCAN_CODES, VK_CODES
-import ctypes
-
-@dataclass(frozen=True, slots=True)
-class TimingPolicy:
-    hold_us: int = 20_000                  # 20ms default hold
-    min_hold_us: int = 12_000              # 12ms absolute min hold
-    release_gap_us: int = 3_000            # 3ms safety release gap
-    repeat_release_gap_us: int = 2_000     # 2ms gap before same-key repeats
-    min_scheduled_hold_us: int = 500       # 0.5ms fallback hold
-
-@dataclass(frozen=True, slots=True)
-class KeyAction:
-    at_us: int
-    scan_codes: tuple[ScanCode, ...]
-    kind: Literal["down", "up"]
-    reason: Literal["note", "release", "repeat_release", "final_release"]
-
-def get_note_scan_code(note_key: str, profile: InstrumentProfile, scan_code_mode: str = "physical") -> int:
-    """Helper to map a note key to its Windows scan code based on the profile layout."""
-    mapped_key = profile.key_map.get(note_key)
-    if not mapped_key:
-        return 0
-        
-    if scan_code_mode == "physical" and mapped_key in PHYSICAL_SCAN_CODES:
-        return PHYSICAL_SCAN_CODES[mapped_key]
-        
-    # Virtual Key mode fallback
-    vk_code = VK_CODES.get(mapped_key)
-    if vk_code is not None:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        return user32.MapVirtualKeyW(vk_code, 0)
-    return 0
+from sky_music.domain import Song, InstrumentProfile
+from sky_music.layouts import SKY_15_KEY_PROFILE, NoteResolver, DefaultNoteResolver
+from sky_music.scheduler_types import TimingPolicy, KeyAction, ScheduleResult, Microseconds
 
 def build_key_actions(
     song: Song,
     profile: InstrumentProfile = SKY_15_KEY_PROFILE,
     policy: TimingPolicy = TimingPolicy(),
-    scan_code_mode: str = "physical"
-) -> dict:
+    scan_code_mode: str = "physical",
+    resolver: NoteResolver | None = None,
+    tempo_scale: float = 1.0
+) -> ScheduleResult:
     """
     Builds a microsecond-accurate event timeline from a domain Song.
-    Returns a dictionary containing:
-      - 'actions': tuple of sorted KeyAction objects
-      - 'compressed_holds': count of note holds compressed due to dense scheduling
-      - 'impossible_same_key_repeats': count of repeats scheduled too fast to meet min-hold
-      - 'max_polyphony': maximum number of notes pressed simultaneously
-      - 'note_count': total number of notes scheduled
+    Returns a ScheduleResult containing:
+      - actions: tuple of sorted KeyAction objects
+      - compressed_holds: count of note holds compressed due to dense scheduling
+      - impossible_same_key_repeats: count of repeats scheduled too fast to meet min-hold
+      - max_polyphony: maximum number of notes pressed simultaneously
+      - note_count: total number of notes scheduled
     """
+    if resolver is None:
+        import sys
+        if sys.platform == "win32":
+            from sky_music.platform.win32.keycodes import Win32NoteResolver
+            resolver = Win32NoteResolver(profile)
+        else:
+            resolver = DefaultNoteResolver(profile)
+
     compressed_holds = 0
     impossible_same_key_repeats = 0
     note_count = len(song.notes)
@@ -57,8 +34,9 @@ def build_key_actions(
     # 1. Flatten all notes into a list of (time_us, scan_code)
     flat_notes = []
     for idx, note in enumerate(song.notes):
-        time_us = note.time_ms * 1000
-        sc = get_note_scan_code(note.key, profile, scan_code_mode)
+        scaled_time_ms = round(note.time_ms / tempo_scale)
+        time_us = scaled_time_ms * 1000
+        sc = resolver.resolve_scan_code(note.key, scan_code_mode)
         if sc <= 0:
             raise ValueError(
                 f"Cannot map note key {note.key!r} to a scan code "
@@ -171,10 +149,20 @@ def build_key_actions(
         else:
             active_keys.difference_update(action.scan_codes)
             
-    return {
-        "actions": tuple(key_actions_list),
-        "compressed_holds": compressed_holds,
-        "impossible_same_key_repeats": impossible_same_key_repeats,
-        "max_polyphony": max_polyphony,
-        "note_count": note_count
-    }
+    warnings = []
+    if impossible_same_key_repeats > 0:
+        warnings.append(f"Detected {impossible_same_key_repeats} impossible same-key repeat(s) scheduled too fast.")
+    if compressed_holds > 0:
+        warnings.append(f"Compressed {compressed_holds} note hold(s) due to dense scheduling.")
+
+    duration_us = Microseconds(key_actions_list[-1].at_us) if key_actions_list else Microseconds(0)
+
+    return ScheduleResult(
+        actions=tuple(key_actions_list),
+        compressed_holds=compressed_holds,
+        impossible_same_key_repeats=impossible_same_key_repeats,
+        max_polyphony=max_polyphony,
+        note_count=note_count,
+        duration_us=duration_us,
+        warnings=tuple(warnings)
+    )

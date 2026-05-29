@@ -1,0 +1,98 @@
+[
+    {
+        "at_us": 1000000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1010000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1020000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1023000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "up",
+        "reason": "release"
+    },
+    {
+        "at_us": 1030000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1033000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "up",
+        "reason": "release"
+    },
+    {
+        "at_us": 1040000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1043000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "up",
+        "reason": "release"
+    },
+    {
+        "at_us": 1050000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1053000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    },
+    {
+        "at_us": 1060000,
+        "scan_codes": [
+            22
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    },
+    {
+        "at_us": 1070000,
+        "scan_codes": [
+            23
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    }
+]

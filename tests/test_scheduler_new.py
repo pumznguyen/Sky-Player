@@ -21,7 +21,7 @@ def test_chord_batching_and_deduplication():
     )
     
     res = build_key_actions(song)
-    actions = res["actions"]
+    actions = res.actions
     
     # We should have exactly 1 down action batch and up action batches
     down_actions = [a for a in actions if a.kind == "down"]
@@ -47,7 +47,7 @@ def test_same_key_repeat_releases_first():
     
     policy = TimingPolicy(hold_us=20_000, repeat_release_gap_us=2_000)
     res = build_key_actions(song, policy=policy)
-    actions = res["actions"]
+    actions = res.actions
     
     assert len(actions) == 4
     
@@ -66,8 +66,8 @@ def test_same_key_repeat_releases_first():
     assert actions[3].kind == "up"
     assert actions[3].reason == "final_release"
     
-    assert res["compressed_holds"] == 1
-    assert res["impossible_same_key_repeats"] == 0
+    assert res.compressed_holds == 1
+    assert res.impossible_same_key_repeats == 0
 
 def test_prioritization_at_same_timestamp():
     """Verify key event scheduling priorities when multiple events fall on the exact same microsecond."""
@@ -116,11 +116,11 @@ def test_impossible_same_key_repeat_diagnostics():
     )
     
     res = build_key_actions(song)
-    assert res["impossible_same_key_repeats"] == 1
-    assert res["compressed_holds"] == 1
+    assert res.impossible_same_key_repeats == 1
+    assert res.compressed_holds == 1
     
     # Check that fallback hold (500us) was applied
-    actions = res["actions"]
+    actions = res.actions
     assert actions[1].at_us == 1000_500 # 1000ms + 500us fallback hold
     assert actions[1].kind == "up"
 
@@ -151,7 +151,7 @@ def test_release_gap_us_affects_normal_release_ordering():
     # Using hold=20ms and release_gap=3ms
     policy = TimingPolicy(hold_us=20_000, release_gap_us=3_000)
     res = build_key_actions(song, policy=policy)
-    actions = res["actions"]
+    actions = res.actions
     
     # Events in flat_notes:
     # Key0 (y): Down at 1000ms, Up at 1020ms (reason: release)
@@ -164,4 +164,48 @@ def test_release_gap_us_affects_normal_release_ordering():
     
     assert down_key1.at_us == 1020_000
     assert up_key0.at_us == 1023_000 # Shifted by release_gap_us (3000us)
+
+def test_pre_playback_schedule_analyzer():
+    """Verify that ScheduleRiskReport correctly diagnoses optimal, impossible-repeat, and dense sheets."""
+    from sky_music.analyzer import analyze_schedule
+    
+    # 1. Optimal Song
+    song_opt = Song(
+        name="Optimal Song",
+        notes=(
+            Note(time_ms=Millis(0), key=NoteKey("Key0")),
+            Note(time_ms=Millis(500), key=NoteKey("Key1")),
+        )
+    )
+    res_opt = build_key_actions(song_opt)
+    report_opt = analyze_schedule(res_opt)
+    assert report_opt.severity == "low"
+    assert "optimal" in report_opt.recommendations[0].lower()
+    
+    # 2. Impossible repeats
+    song_imp = Song(
+        name="Impossible Repeats",
+        notes=(
+            Note(time_ms=Millis(1000), key=NoteKey("Key0")),
+            Note(time_ms=Millis(1001), key=NoteKey("Key0")), # 1ms repeat
+        )
+    )
+    res_imp = build_key_actions(song_imp)
+    report_imp = analyze_schedule(res_imp)
+    assert report_imp.severity == "high"
+    assert report_imp.impossible_repeats == 1
+    assert any("impossible" in rec.lower() for rec in report_imp.recommendations)
+
+    # 3. Dense clusters (15 notes all within 50ms)
+    notes_dense = []
+    for idx in range(15):
+        notes_dense.append(Note(time_ms=Millis(1000 + idx * 3), key=NoteKey(f"Key{idx % 5}")))
+    song_dense = Song(name="Dense Song", notes=tuple(notes_dense))
+    res_dense = build_key_actions(song_dense)
+    report_dense = analyze_schedule(res_dense)
+    # The severity should flag as high or medium due to many notes in 100ms
+    assert report_dense.severity in ("medium", "high")
+    assert len(report_dense.dense_clusters) > 0
+    assert any("dense" in rec.lower() for rec in report_dense.recommendations)
+
 

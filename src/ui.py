@@ -68,6 +68,7 @@ class PlaybackControls:
     skip: HotkeyBinding
     quit: HotkeyBinding
     refocus: HotkeyBinding
+    panic: HotkeyBinding
     enabled: bool = True
     _was_down: dict[str, bool] = field(default_factory=dict)
 
@@ -78,7 +79,8 @@ class PlaybackControls:
             f"{self.pause.display} pause/resume | "
             f"{self.skip.display} skip | "
             f"{self.quit.display} quit | "
-            f"{self.refocus.display} refocus Sky"
+            f"{self.refocus.display} refocus Sky | "
+            f"{self.panic.display} panic release"
         )
 
     def poll(self) -> str | None:
@@ -89,6 +91,7 @@ class PlaybackControls:
             ("skip", self.skip),
             ("pause", self.pause),
             ("refocus", self.refocus),
+            ("panic", self.panic),
         ):
             is_down = is_hotkey_down(hotkey)
             was_down = self._was_down.get(action, False)
@@ -98,12 +101,30 @@ class PlaybackControls:
         return None
 
 def is_hotkey_down(hotkey: HotkeyBinding) -> bool:
-    if is_virtual_key_down(VK_CONTROL) != hotkey.ctrl:
+    """Check if a hotkey is currently pressed.
+
+    Required modifiers must be held; extra modifiers are ignored unless
+    the hotkey itself has no modifiers (to avoid false positives with
+    Ctrl+something accidentally triggering plain-key hotkeys).
+    """
+    ctrl_down = is_virtual_key_down(VK_CONTROL)
+    alt_down = is_virtual_key_down(VK_MENU)
+    shift_down = is_virtual_key_down(VK_SHIFT)
+
+    # Required modifiers must be held
+    if hotkey.ctrl and not ctrl_down:
         return False
-    if is_virtual_key_down(VK_MENU) != hotkey.alt:
+    if hotkey.alt and not alt_down:
         return False
-    if is_virtual_key_down(VK_SHIFT) != hotkey.shift:
+    if hotkey.shift and not shift_down:
         return False
+
+    # For plain (no-modifier) hotkeys, require that no modifier is held
+    # to prevent Ctrl+F8 accidentally triggering the plain F8 hotkey.
+    if not hotkey.has_modifier:
+        if ctrl_down or alt_down or shift_down:
+            return False
+
     return is_virtual_key_down(hotkey.key_code)
 
 def parse_hotkey(value: str) -> HotkeyBinding:

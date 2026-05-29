@@ -1,0 +1,34 @@
+[
+    {
+        "at_us": 1000000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1013000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "up",
+        "reason": "repeat_release"
+    },
+    {
+        "at_us": 1015000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "down",
+        "reason": "note"
+    },
+    {
+        "at_us": 1035000,
+        "scan_codes": [
+            21
+        ],
+        "kind": "up",
+        "reason": "final_release"
+    }
+]

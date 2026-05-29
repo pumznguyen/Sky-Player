@@ -1,15 +1,16 @@
 import time
 from typing import Tuple, Optional
 from sky_music.domain import Song
-from sky_music.scheduler import KeyAction
+from sky_music.scheduler_types import KeyAction
 from sky_music.backend import InputBackend
 from sky_music.telemetry import TelemetryLogger
+from sky_music.timing import Clock, Sleeper, PerfCounterClock, RealSleeper, SleepPolicy
+from sky_music.focus import FocusGuard, NoopFocusGuard, Win32SkyFocusGuard
 
 # We use standard outputs from UI and main
 PLAYBACK_FINISHED = "finished"
 PLAYBACK_SKIPPED = "skipped"
 PLAYBACK_QUIT = "quit"
-PLAYBACK_POLL_SECONDS = 0.025
 
 class PlaybackEngine:
     """Manages the real-time execution loop of the scheduled KeyActions timeline."""
@@ -21,21 +22,41 @@ class PlaybackEngine:
         controls = None,
         renderer = None,
         telemetry_enabled: bool = False,
-        require_focus: bool = True
+        require_focus: bool = True,
+        clock: Optional[Clock] = None,
+        sleeper: Optional[Sleeper] = None,
+        sleep_policy: SleepPolicy = SleepPolicy(),
+        focus_guard: Optional[FocusGuard] = None,
+        profile_name: str = "balanced",
+        tempo_scale: float = 1.0
     ):
         self.song = song
         self.actions = actions
         self.backend = backend
         self.controls = controls
         self.renderer = renderer
-        self.telemetry = TelemetryLogger(song.name, enabled=telemetry_enabled)
+        self.telemetry = TelemetryLogger(
+            song.name,
+            enabled=telemetry_enabled,
+            profile_name=profile_name,
+            tempo_scale=tempo_scale
+        )
         self.require_focus = require_focus
+        self.clock = clock if clock is not None else PerfCounterClock()
+        self.sleeper = sleeper if sleeper is not None else RealSleeper()
+        self.sleep_policy = sleep_policy
+        
+        # Inject standard FocusGuard depending on requirements
+        if focus_guard is None:
+            if self.require_focus:
+                self.focus_guard: FocusGuard = Win32SkyFocusGuard()
+            else:
+                self.focus_guard = NoopFocusGuard()
+        else:
+            self.focus_guard = focus_guard
         
     def play(self) -> str:
-        # Avoid dynamic imports if possible, but keep focus/window primitives handy
-        import inputs
-        
-        start_perf = time.perf_counter()
+        start_perf = self.clock.now_us()
         pause_time_us = 0
         manual_pause_started_us = None
         focus_pause_started_us = None
@@ -50,8 +71,8 @@ class PlaybackEngine:
         max_lateness_us = 0
         
         def get_elapsed_us() -> int:
-            now_us = int(time.perf_counter() * 1_000_000)
-            elapsed = now_us - int(start_perf * 1_000_000) - pause_time_us
+            now_us = self.clock.now_us()
+            elapsed = now_us - start_perf - pause_time_us
             if manual_pause_started_us is not None:
                 elapsed -= (now_us - manual_pause_started_us)
             if focus_pause_started_us is not None:
@@ -59,19 +80,26 @@ class PlaybackEngine:
             return max(0, elapsed)
             
         def sleep_for_playback(remaining_seconds: float) -> None:
-            if remaining_seconds > 0.05:
-                time.sleep(min(PLAYBACK_POLL_SECONDS, max(0.001, remaining_seconds - 0.01)))
+            policy = self.sleep_policy
+            if remaining_seconds <= 0:
+                return
+                
+            if remaining_seconds > 0.050:
+                # Long sleep: yield fully to the OS
+                self.sleeper.sleep(min(policy.poll_s, remaining_seconds - 0.010))
             elif remaining_seconds > 0.005:
-                time.sleep(0.001)
+                # Medium sleep: minor yield
+                self.sleeper.sleep(policy.min_sleep_s)
             else:
-                time.sleep(0)
+                # Tiny sleep / yield zone: yield thread slice
+                self.sleeper.sleep(0)
                 
         # Main execution loop
         try:
             for idx, action in enumerate(self.actions):
                 while True:
                     command = self.controls.poll() if self.controls is not None else None
-                    now_us = int(time.perf_counter() * 1_000_000)
+                    now_us = self.clock.now_us()
                     
                     if command == "quit":
                         if self.renderer:
@@ -84,9 +112,15 @@ class PlaybackEngine:
                         return PLAYBACK_SKIPPED
                         
                     if command == "refocus":
-                        inputs.focusWindow()
+                        self.focus_guard.focus()
                         if self.renderer:
                             self.renderer.render(get_elapsed_us() / 1_000_000, total_time_seconds, self.song.name, status="refocus", force=True)
+
+                    if command == "panic":
+                        # Emergency release: release all currently held keys, then continue playback
+                        self.backend.release_all()
+                        if self.renderer:
+                            self.renderer.render(get_elapsed_us() / 1_000_000, total_time_seconds, self.song.name, status="panic", force=True)
                             
                     if command == "pause":
                         if manual_pause_started_us is None:
@@ -103,21 +137,21 @@ class PlaybackEngine:
                     if manual_pause_started_us is not None:
                         if self.renderer:
                             self.renderer.render(get_elapsed_us() / 1_000_000, total_time_seconds, self.song.name, status="paused")
-                        time.sleep(PLAYBACK_POLL_SECONDS)
+                        self.sleeper.sleep(self.sleep_policy.poll_s)
                         continue
                         
-                    # Check target window focus (Windows-specific check)
-                    if self.require_focus and hasattr(inputs, "is_sky_active") and not inputs.is_sky_active():
+                    # Check target window focus (Windows-specific check isolated behind FocusGuard)
+                    if self.require_focus and not self.focus_guard.is_active():
                         self.backend.release_all()
                         if focus_pause_started_us is None:
-                            focus_pause_started_us = int(time.perf_counter() * 1_000_000)
+                            focus_pause_started_us = self.clock.now_us()
                         if self.renderer:
                             self.renderer.render(get_elapsed_us() / 1_000_000, total_time_seconds, self.song.name, status="focus_lost")
-                        time.sleep(PLAYBACK_POLL_SECONDS)
+                        self.sleeper.sleep(self.sleep_policy.poll_s)
                         continue
                         
                     if focus_pause_started_us is not None:
-                        pause_time_us += (int(time.perf_counter() * 1_000_000) - focus_pause_started_us)
+                        pause_time_us += (self.clock.now_us() - focus_pause_started_us)
                         focus_pause_started_us = None
                         if self.renderer:
                             self.renderer.render(get_elapsed_us() / 1_000_000, total_time_seconds, self.song.name, status="playing", force=True)
@@ -167,7 +201,8 @@ class PlaybackEngine:
                 self.renderer.render(total_time_seconds, total_time_seconds, self.song.name, status="done", force=True)
                 self.renderer.finish(f"Finished playing {self.song.name}")
                 
-            # Log summary diagnostic metrics to standard inputs debug_log
+            # Log summary diagnostic metrics
+            import inputs
             if hasattr(inputs, "PLAYBACK_DEBUG") and inputs.PLAYBACK_DEBUG:
                 inputs.debug_log(
                     f"Timing summary (Microsecond Engine): "
@@ -181,4 +216,5 @@ class PlaybackEngine:
             
         finally:
             self.backend.release_all()
+            self.telemetry.record_backend_health(self.backend.get_health())
             self.telemetry.save()

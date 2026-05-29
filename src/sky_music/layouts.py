@@ -63,3 +63,23 @@ SKY_15_KEY_PROFILE = InstrumentProfile(
     note_count=15,
     key_map={NoteKey(k): v for k, v in SKY_15_KEY_MAP.items()}
 )
+
+from typing import Protocol
+
+class NoteResolver(Protocol):
+    def resolve_scan_code(self, note_key: str, scan_code_mode: str = "physical") -> int:
+        """Resolve a note key to its scan code."""
+        ...
+
+class DefaultNoteResolver:
+    def __init__(self, profile: InstrumentProfile):
+        self.profile = profile
+
+    def resolve_scan_code(self, note_key: str, scan_code_mode: str = "physical") -> int:
+        mapped_key = self.profile.key_map.get(NoteKey(note_key))
+        if not mapped_key:
+            return 0
+        if mapped_key in PHYSICAL_SCAN_CODES:
+            return PHYSICAL_SCAN_CODES[mapped_key]
+        return 0
+

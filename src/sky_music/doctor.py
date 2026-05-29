@@ -1,5 +1,6 @@
 import sys
 import ctypes
+from ctypes import wintypes
 from pathlib import Path
 from sky_music.layouts import SKY_15_KEY_PROFILE, PHYSICAL_SCAN_CODES, VK_CODES
 import inputs
@@ -20,7 +21,7 @@ def check_sky_window() -> dict:
         status["msg"] = "Sky window NOT found. Ensure the game is running and verify --sky-process-names."
         return status
         
-    pid = ctypes.wintypes.DWORD()
+    pid = wintypes.DWORD()
     inputs.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
     proc_name = inputs.get_process_name_by_pid(pid.value)
     
@@ -33,9 +34,9 @@ def check_sky_window() -> dict:
     
     msg_parts = [f"Found Sky window (HWND={hwnd}, PID={pid.value}, Process={status['process']})."]
     if not current_admin:
-        msg_parts.append("Note: Running as non-Admin. If Sky is running as Administrator, keystrokes will be blocked by Windows UIPI.")
+        msg_parts.append("Note: Running as standard user. If Sky is elevated (Administrator), Windows UIPI may block keystrokes — run this tool as Admin if input is not reaching the game.")
     else:
-        msg_parts.append("Running with Admin privileges (UIPI bypass ready).")
+        msg_parts.append("Running as Administrator — input compatibility with elevated game windows is likely.")
         
     status["msg"] = " ".join(msg_parts)
     return status
@@ -104,7 +105,7 @@ def check_physical_keys_held() -> dict:
 def run_all_doctor_checks() -> bool:
     """Runs a complete diagnostic suite and prints standard actionable recommendations."""
     print("=" * 60)
-    print("             SKY MUSIC PLAYER CLINICAL DOCTOR")
+    print("         SKY MUSIC PLAYER — READINESS CHECK")
     print("=" * 60)
     print(f"OS Platform      : {sys.platform} (Windows expected)")
     print(f"Python Version   : {sys.version.split()[0]}")
@@ -141,9 +142,9 @@ def run_all_doctor_checks() -> bool:
     
     all_ok = win_diag["ok"] and time_diag["ok"] and kb_diag["ok"] and conflict_diag["ok"]
     if all_ok:
-        print("Doctor diagnosis: ALL CHECKS PASSED. Ready for precise playback!")
+        print("Result: ALL CHECKS PASSED — ready for precise playback.")
     else:
-        print("Doctor diagnosis: SOMETHING REQUIRES ATTENTION (Check details above).")
+        print("Result: ATTENTION NEEDED — review the details above before playing.")
     print("=" * 60)
     
     return all_ok

@@ -41,8 +41,9 @@ def test_cli_hotkeys_defaults():
     
     assert args.pause_key == "f8"
     assert args.skip_key == "f9"
-    assert args.quit_key == "esc"
+    assert args.quit_key == "f10"
     assert args.refocus_key == "f6"
+    assert args.panic_key == "ctrl+alt+backspace"
     assert args.disable_hotkeys is False
     assert args.allow_note_hotkeys is False
 
@@ -55,8 +56,9 @@ def test_cli_playback_controls_parsing():
     controls = main.build_playback_controls(args)
     assert controls.pause.display == "F8"
     assert controls.skip.display == "F9"
-    assert controls.quit.display == "Esc"
+    assert controls.quit.display == "F10"
     assert controls.refocus.display == "F6"
+    assert controls.panic.display == "Ctrl+Alt+Backspace"
     assert controls.enabled is True
     
     # 2. Disabled hotkeys
