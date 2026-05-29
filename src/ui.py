@@ -3,7 +3,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from inputs import is_virtual_key_down, focusWindow
-from scheduler import key_maps, VK_CODES
+from sky_music.layouts import SKY_15_KEY_MAP as key_maps, VK_CODES
 
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
@@ -47,7 +47,7 @@ class HotkeyBinding:
     shift: bool = False
 
     @property
-    def display(self):
+    def display(self) -> str:
         parts = []
         if self.ctrl:
             parts.append("Ctrl")
@@ -59,7 +59,7 @@ class HotkeyBinding:
         return "+".join(parts)
 
     @property
-    def has_modifier(self):
+    def has_modifier(self) -> bool:
         return self.ctrl or self.alt or self.shift
 
 @dataclass
@@ -69,19 +69,19 @@ class PlaybackControls:
     quit: HotkeyBinding
     refocus: HotkeyBinding
     enabled: bool = True
-    _was_down: dict = field(default_factory=dict)
+    _was_down: dict[str, bool] = field(default_factory=dict)
 
-    def hint(self):
+    def hint(self) -> str:
         if not self.enabled:
             return "hotkeys disabled"
         return (
             f"{self.pause.display} pause/resume | "
             f"{self.skip.display} skip | "
             f"{self.quit.display} quit | "
-            f"{self.refocus.display} focus"
+            f"{self.refocus.display} refocus Sky"
         )
 
-    def poll(self):
+    def poll(self) -> str | None:
         if not self.enabled:
             return None
         for action, hotkey in (
@@ -97,7 +97,7 @@ class PlaybackControls:
                 return action
         return None
 
-def is_hotkey_down(hotkey):
+def is_hotkey_down(hotkey: HotkeyBinding) -> bool:
     if is_virtual_key_down(VK_CONTROL) != hotkey.ctrl:
         return False
     if is_virtual_key_down(VK_MENU) != hotkey.alt:
@@ -106,7 +106,7 @@ def is_hotkey_down(hotkey):
         return False
     return is_virtual_key_down(hotkey.key_code)
 
-def parse_hotkey(value):
+def parse_hotkey(value: str) -> HotkeyBinding:
     raw = value.strip()
     if not raw:
         raise ValueError("hotkey cannot be empty")
@@ -151,12 +151,12 @@ def parse_hotkey(value):
 
     raise ValueError(f"unsupported hotkey: {value!r}")
 
-def hotkey_conflicts_with_note_keys(hotkey):
+def hotkey_conflicts_with_note_keys(hotkey: HotkeyBinding) -> bool:
     if hotkey.has_modifier:
         return False
     return hotkey.name.casefold() in {mapped_key.casefold() for mapped_key in key_maps.values()}
 
-def format_duration(seconds):
+def format_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     minutes, sec = divmod(seconds, 60)
     hours, minutes = divmod(minutes, 60)
@@ -164,7 +164,7 @@ def format_duration(seconds):
         return f"{hours}:{minutes:02}:{sec:02}"
     return f"{minutes}:{sec:02}"
 
-def truncate_text(text, max_length):
+def truncate_text(text: str, max_length: int) -> str:
     if max_length <= 0:
         return ""
     if len(text) <= max_length:
@@ -174,11 +174,11 @@ def truncate_text(text, max_length):
     return text[: max_length - 1] + "…"
 
 class ProgressRenderer:
-    def __init__(self, controls=None):
+    def __init__(self, controls: PlaybackControls | None = None) -> None:
         self.controls = controls
-        self.last_render_at = 0.0
+        self.last_render_at: float = 0.0
 
-    def render(self, current, total, song_name, status="playing", force=False):
+    def render(self, current: float, total: float, song_name: str, status: str = "playing", force: bool = False) -> None:
         now = time.perf_counter()
         if not force and now - self.last_render_at < PROGRESS_RENDER_INTERVAL_SECONDS:
             return
@@ -191,6 +191,8 @@ class ProgressRenderer:
         time_text = f"{format_duration(current)}/{format_duration(total)}"
         status_text = status.upper().replace("_", " ")
         controls_hint = ""
+        if status == "focus_lost" and self.controls is not None:
+            controls_hint = f"Press {self.controls.refocus.display} to refocus Sky"
 
         max_song_length = max(12, min(34, terminal_width // 3))
         song_label = truncate_text(song_name, max_song_length)
@@ -212,14 +214,8 @@ class ProgressRenderer:
 
         print("\r\033[K" + line, end="", flush=True)
 
-    def finish(self, message):
+    def finish(self, message: str) -> None:
         print("\r\033[K" + message, flush=True)
 
-def progress_bar(current, total, song_name, replace_line, bar_length=40):
-    renderer = ProgressRenderer()
-    renderer.render(current, total, song_name, force=True)
-    if current >= total:
-        print("")
-
-def clear_terminal():
+def clear_terminal() -> None:
     os.system('cls' if os.name == 'nt' else 'clear')

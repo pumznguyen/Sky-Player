@@ -1,25 +1,26 @@
 import json
 import time
 from pathlib import Path
-from scheduler import NOTE_SCAN_CODES
+from typing import Any
 import inputs
 
-SONG_DIR = Path("songs")
-SUPPORTED_EXTENSIONS = {".json", ".skysheet"}
-CONFIG_PATH = Path("config.json")
+SONG_DIR: Path = Path("songs")
+SUPPORTED_EXTENSIONS: set[str] = {".json", ".skysheet"}
+CONFIG_PATH: Path = Path("config.json")
 
-def load_saved_theme():
+def load_saved_theme() -> str:
     if CONFIG_PATH.exists():
         try:
             with CONFIG_PATH.open("r", encoding="utf-8") as f:
                 data = json.load(f)
                 theme = data.get("theme")
-                return theme
+                if isinstance(theme, str):
+                    return theme
         except Exception:
             pass
     return "aurora"
 
-def save_theme(theme_name):
+def save_theme(theme_name: str) -> None:
     try:
         data = {}
         if CONFIG_PATH.exists():
@@ -34,12 +35,12 @@ def save_theme(theme_name):
     except Exception:
         pass
 
-ACTIVE_THEME = load_saved_theme()
+ACTIVE_THEME: str = load_saved_theme()
 
-_song_choices_cache = []
-_song_choices_mtime_ns = None
+_song_choices_cache: list[Path] = []
+_song_choices_mtime_ns: int | None = None
 
-def load_song_choices():
+def load_song_choices() -> list[Path]:
     if not SONG_DIR.exists():
         return []
     return sorted(
@@ -47,7 +48,7 @@ def load_song_choices():
         key=lambda path: path.name.lower(),
     )
 
-def get_song_choices(force_refresh=False):
+def get_song_choices(force_refresh: bool = False) -> list[Path]:
     global _song_choices_cache, _song_choices_mtime_ns
     if not SONG_DIR.exists():
         _song_choices_cache = []
@@ -60,7 +61,7 @@ def get_song_choices(force_refresh=False):
         _song_choices_mtime_ns = current_mtime_ns
     return _song_choices_cache
 
-def resolve_song_selection(selection_text, song_choices):
+def resolve_song_selection(selection_text: str, song_choices: list[Path]) -> Path | None:
     selection = selection_text.strip()
     if not selection:
         return None
@@ -101,57 +102,14 @@ def resolve_song_selection(selection_text, song_choices):
     print(f"Song not found: {selection!r}")
     return None
 
-def prepare_song_data(song_data):
-    song = song_data[0]
-    scan_code_batches = []
-    current_time = None
-    current_scan_codes = []
-    song_notes = sorted(song.get("songNotes", []), key=lambda note: note["time"])
-
-    for note in song_notes:
-        note_time = note["time"]
-        scan_code = NOTE_SCAN_CODES.get(note["key"])
-        if scan_code is None:
-            print("Skipped: Key not found in mapping")
-            continue
-
-        if current_time is None or note_time != current_time:
-            if current_scan_codes:
-                scan_code_batches.append((current_time, tuple(current_scan_codes)))
-            current_time = note_time
-            current_scan_codes = [scan_code]
-        else:
-            current_scan_codes.append(scan_code)
-
-    if current_scan_codes:
-        scan_code_batches.append((current_time, tuple(current_scan_codes)))
-
-    song["__scan_code_batches"] = tuple(scan_code_batches)
-    song["__total_time"] = scan_code_batches[-1][0] / 1000 if scan_code_batches else 0
-    song["__name"] = song.get("name", "Unknown Song")
-    return song_data
-
-def load_song_data(selected_song):
-    try:
-        with selected_song.open('r', encoding='utf-8') as file:
-            song_data = json.load(file)
-        return prepare_song_data(song_data)
-    except FileNotFoundError:
-        print(f"Song not found: {selected_song}")
-    except json.JSONDecodeError as exc:
-        print(f"Invalid song file: {selected_song.name} ({exc})")
-    except KeyError as exc:
-        print(f"Invalid song structure in {selected_song.name}: missing {exc}")
-    return None
-
-def countdown_before_playback(seconds):
+def countdown_before_playback(seconds: int) -> None:
     for remaining in range(max(seconds, 0), 0, -1):
         print(f"\rPlaying song in {remaining}", end='', flush=True)
         time.sleep(1)
     if seconds > 0:
         print("\r" + " " * 32 + "\r", end='', flush=True)
 
-def ensure_sky_ready():
+def ensure_sky_ready() -> bool:
     inputs.sky = inputs.get_sky_window()
     if inputs.sky is None:
         print("Sky was not detected. Open Sky before playing a song.")
@@ -297,12 +255,12 @@ THEME_PRESETS = {
 }
 
 
-def get_theme(theme_name=None):
+def get_theme(theme_name: str | None = None) -> tuple[str, dict[str, Any]]:
     requested_theme = (theme_name or ACTIVE_THEME or "aurora").casefold()
     return requested_theme, THEME_PRESETS.get(requested_theme, THEME_PRESETS["aurora"])
 
 
-def remove_accents(input_str):
+def remove_accents(input_str: str) -> str:
     if not input_str:
         return ""
     nfkd_form = unicodedata.normalize('NFKD', input_str)
@@ -310,7 +268,7 @@ def remove_accents(input_str):
     return res.replace('đ', 'd').replace('Đ', 'D')
 
 
-def normalized_index_map(text):
+def normalized_index_map(text: str) -> tuple[str, list[int]]:
     normalized_chars = []
     index_map = []
     for original_index, char in enumerate(text):
@@ -321,7 +279,7 @@ def normalized_index_map(text):
     return "".join(normalized_chars), index_map
 
 
-def get_match_span(text, normalized_query):
+def get_match_span(text: str, normalized_query: str) -> tuple[int, int] | None:
     if not normalized_query:
         return None
     normalized_text, index_map = normalized_index_map(text)
@@ -332,7 +290,7 @@ def get_match_span(text, normalized_query):
     return index_map[match_start], index_map[match_end] + 1
 
 
-def append_highlighted_song_name(lines, song_name, normalized_query, selected=False):
+def append_highlighted_song_name(lines: list[tuple[str, str]], song_name: str, normalized_query: str, selected: bool = False) -> None:
     if selected:
         lines.append(("class:selected", song_name))
         return
@@ -348,7 +306,7 @@ def append_highlighted_song_name(lines, song_name, normalized_query, selected=Fa
     lines.append(("class:unselected", song_name[end:]))
 
 
-def truncate_text(text, max_width):
+def truncate_text(text: str, max_width: int) -> str:
     if max_width <= 1:
         return "…"
     if len(text) <= max_width:
@@ -356,7 +314,7 @@ def truncate_text(text, max_width):
     return text[: max_width - 1] + "…"
 
 
-def choose_song_interactively(theme_name=None):
+def choose_song_interactively(theme_name: str | None = None) -> Path | None:
     if not HAS_PROMPT_TOOLKIT:
         return None
 
@@ -403,7 +361,7 @@ def choose_song_interactively(theme_name=None):
 
     kb = KeyBindings()
 
-    def build_header_text():
+    def build_header_text() -> list[tuple[str, str]]:
         terminal_width = max(48, shutil.get_terminal_size((80, 24)).columns)
         title = " SKY MUSIC PICKER "
         meta = f" {len(song_choices)} songs • theme: {current_theme_name} "
@@ -414,7 +372,7 @@ def choose_song_interactively(theme_name=None):
             ("class:divider", divider + "\n"),
         ]
 
-    def build_footer_text():
+    def build_footer_text() -> list[tuple[str, str]]:
         return [
             ("class:key", "↑/↓"),
             ("class:footer", " move  "),
@@ -428,7 +386,7 @@ def choose_song_interactively(theme_name=None):
             ("class:footer", " refresh"),
         ]
 
-    def filter_songs(query):
+    def filter_songs(query: str) -> list[Path]:
         if not query:
             return list(song_choices)
 
@@ -450,7 +408,7 @@ def choose_song_interactively(theme_name=None):
 
         return matches + startswith_matches + contains_matches
 
-    def build_result_text(query):
+    def build_result_text(query: str) -> list[tuple[str, str]]:
         terminal_width = max(48, shutil.get_terminal_size((80, 24)).columns)
         name_width = max(20, min(terminal_width - 16, 72))
         lines = []
@@ -499,7 +457,7 @@ def choose_song_interactively(theme_name=None):
 
         return lines
 
-    def build_detail_text():
+    def build_detail_text() -> list[tuple[str, str]]:
         query_text = search_field.text.strip()
         if not filtered_songs:
             return [
@@ -520,7 +478,7 @@ def choose_song_interactively(theme_name=None):
             ("class:detail", path_label),
         ]
 
-    def update_ui():
+    def update_ui() -> None:
         nonlocal selected_index, filtered_songs
         query = remove_accents(search_field.text).casefold().strip()
         previous_selected_song = filtered_songs[selected_index] if filtered_songs else None
@@ -565,6 +523,8 @@ def choose_song_interactively(theme_name=None):
     @kb.add("c-c")
     def cancel(event):
         event.app.exit(result=None)
+
+
 
     @kb.add("c-r")
     def reload_songs(event):

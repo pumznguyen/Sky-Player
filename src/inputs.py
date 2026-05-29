@@ -2,6 +2,7 @@ import ctypes
 from ctypes import wintypes
 import time
 from pathlib import Path
+from collections.abc import Callable
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -103,23 +104,23 @@ winmm.timeEndPeriod.argtypes = (wintypes.UINT,)
 winmm.timeEndPeriod.restype = wintypes.UINT
 
 TIMER_RESOLUTION_MS = 1
-_timer_resolution_enabled = False
+_timer_resolution_enabled: bool = False
 
 # Global configuration variables to be updated by main.py
-EXPECTED_PROCESS_NAMES = {"Sky.exe", "Sky Children of the Light.exe"}
-ALLOW_TITLE_FALLBACK = False
-PLAYBACK_DEBUG = False
-REJECTED_WINDOW_WARNINGS = set()
-sky = None
+EXPECTED_PROCESS_NAMES: set[str] = {"Sky.exe", "Sky Children of the Light.exe"}
+ALLOW_TITLE_FALLBACK: bool = False
+PLAYBACK_DEBUG: bool = False
+REJECTED_WINDOW_WARNINGS: set[int] = set()
+sky: int | None = None
 
 # We dynamically hook debug_log to avoid circular dependency
-_debug_log_callback = None
+_debug_log_callback: Callable[[str], None] | None = None
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     if _debug_log_callback is not None:
         _debug_log_callback(message)
 
-def enable_high_precision_timers():
+def enable_high_precision_timers() -> None:
     global _timer_resolution_enabled
     if _timer_resolution_enabled:
         return
@@ -128,14 +129,14 @@ def enable_high_precision_timers():
         raise ctypes.WinError(ctypes.get_last_error())
     _timer_resolution_enabled = True
 
-def disable_high_precision_timers():
+def disable_high_precision_timers() -> None:
     global _timer_resolution_enabled
     if not _timer_resolution_enabled:
         return
     winmm.timeEndPeriod(TIMER_RESOLUTION_MS)
     _timer_resolution_enabled = False
 
-def wait_seconds(seconds):
+def wait_seconds(seconds: float) -> None:
     if seconds <= 0:
         return
     deadline = time.perf_counter() + seconds
@@ -152,11 +153,12 @@ def wait_seconds(seconds):
         else:
             pass
 
-def send_input_batch(inputs):
+def send_input_batch(inputs: list[INPUT]) -> None:
     if not inputs:
         return
     pending_inputs = list(inputs)
     retries_without_progress = 0
+    total_inputs = len(inputs)
     while pending_inputs:
         input_array = (INPUT * len(pending_inputs))(*pending_inputs)
         sent = user32.SendInput(len(pending_inputs), input_array, ctypes.sizeof(INPUT))
@@ -168,10 +170,16 @@ def send_input_batch(inputs):
             continue
         retries_without_progress += 1
         if retries_without_progress >= 3:
-            raise ctypes.WinError(ctypes.get_last_error())
+            err_code = ctypes.get_last_error()
+            raise OSError(
+                f"SendInput failure: sent {total_inputs - len(pending_inputs)}/{total_inputs} actions. "
+                f"Windows Error Code: {err_code} ({ctypes.FormatError(err_code).strip()}). "
+                f"Possible reasons: Sky is elevated (Admin) while this script is not (UIPI mismatch), "
+                f"or target window handles became invalid."
+            )
         wait_seconds(0.002)
 
-def send_scan_code_batch(scan_codes, key_up=False):
+def send_scan_code_batch(scan_codes: tuple[int, ...] | list[int], key_up: bool = False) -> None:
     if not scan_codes:
         return
     scan_codes = tuple(dict.fromkeys(scan_codes))
@@ -183,23 +191,7 @@ def send_scan_code_batch(scan_codes, key_up=False):
         key_inputs.append(key_input)
     send_input_batch(key_inputs)
 
-def release_active_keys(active_down_keys, active_down_started_at):
-    if active_down_keys:
-        send_scan_code_batch(tuple(active_down_keys), key_up=True)
-    active_down_keys.clear()
-    active_down_started_at.clear()
-
-def press_scan_code_group(scan_codes, hold_seconds=0.02):
-    if not scan_codes:
-        return
-    scan_codes = tuple(dict.fromkeys(scan_codes))
-    send_scan_code_batch(scan_codes, key_up=False)
-    try:
-        wait_seconds(hold_seconds)
-    finally:
-        send_scan_code_batch(scan_codes, key_up=True)
-
-def get_process_name_by_pid(pid):
+def get_process_name_by_pid(pid: int) -> str | None:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     h_process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not h_process:
@@ -216,11 +208,11 @@ def get_process_name_by_pid(pid):
         kernel32.CloseHandle(h_process)
     return None
 
-def get_sky_window():
+def get_sky_window() -> int | None:
     found_window = wintypes.HWND()
     rejected_candidates = []
 
-    def enum_window_callback(hwnd, _lparam):
+    def enum_window_callback(hwnd: int, _lparam: int) -> bool:
         if not user32.IsWindowVisible(hwnd):
             return True
         title_length = user32.GetWindowTextLengthW(hwnd)
@@ -277,7 +269,7 @@ def get_sky_window():
                 )
     return res
 
-def is_sky_window_valid():
+def is_sky_window_valid() -> bool:
     global sky
     if sky is None or not user32.IsWindow(sky):
         sky = get_sky_window()
@@ -303,7 +295,7 @@ def is_sky_window_valid():
     sky = get_sky_window()
     return sky is not None
 
-def focusWindow():
+def focusWindow() -> bool:
     global sky
     if not is_sky_window_valid():
         return False
@@ -326,9 +318,9 @@ def focusWindow():
         if attached:
             user32.AttachThreadInput(current_thread_id, foreground_thread_id, False)
 
-def is_sky_active():
+def is_sky_active() -> bool:
     global sky
     return is_sky_window_valid() and user32.GetForegroundWindow() == sky
 
-def is_virtual_key_down(key_code):
+def is_virtual_key_down(key_code: int) -> bool:
     return bool(user32.GetAsyncKeyState(key_code) & 0x8000)

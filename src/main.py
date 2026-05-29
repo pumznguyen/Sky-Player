@@ -8,20 +8,7 @@ import inputs
 from inputs import (
     enable_high_precision_timers,
     disable_high_precision_timers,
-    wait_seconds,
-    send_scan_code_batch,
-    release_active_keys,
-    focusWindow,
-    get_sky_window,
-    is_sky_active
-)
-from scheduler import (
-    MIN_KEY_HOLD_SECONDS,
-    REPEAT_RELEASE_GAP_SECONDS,
-    key_maps,
-    NOTE_SCAN_CODES,
-    build_note_scan_codes,
-    build_playback_events
+    focusWindow
 )
 from ui import (
     PLAYBACK_FINISHED,
@@ -39,17 +26,20 @@ from songs import (
     SUPPORTED_EXTENSIONS,
     get_song_choices,
     resolve_song_selection,
-    load_song_data,
     countdown_before_playback,
     ensure_sky_ready
 )
 
 PLAYBACK_DEBUG = False
+CURRENT_SCAN_CODE_MODE = "physical"
 DEBUG_LOG_PATH = None
 DEBUG_START_PERF = None
 DEBUG_LOG_BUFFER = []
+TIMING_POLICY = None
+TELEMETRY_CSV_ENABLED = False
+DRY_RUN_MODE = False
 
-def init_debug_log():
+def init_debug_log() -> None:
     global DEBUG_LOG_PATH, DEBUG_START_PERF
     DEBUG_START_PERF = time.perf_counter()
     debug_log_dir = Path("logs")
@@ -58,14 +48,14 @@ def init_debug_log():
     with DEBUG_LOG_PATH.open("w", encoding="utf-8") as log_file:
         log_file.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Debug playback log started\n")
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     if not PLAYBACK_DEBUG:
         return
     now = time.perf_counter()
     rel = 0.0 if DEBUG_START_PERF is None else now - DEBUG_START_PERF
     DEBUG_LOG_BUFFER.append(f"[{time.strftime('%Y-%m-%d %H:%M:%S')} +{rel:.6f}s] {message}")
 
-def flush_debug_log():
+def flush_debug_log() -> None:
     global DEBUG_LOG_BUFFER
     if not PLAYBACK_DEBUG or DEBUG_LOG_PATH is None or not DEBUG_LOG_BUFFER:
         return
@@ -80,246 +70,50 @@ def flush_debug_log():
 # Kết nối hàm debug_log của main.py sang inputs.py để đồng bộ logging
 inputs._debug_log_callback = debug_log
 
-def play_music(song_data, controls=None):
-    global DEBUG_START_PERF
-    DEBUG_START_PERF = time.perf_counter()
+def play_selected_song(selected_song: Path, countdown_seconds: int, controls: PlaybackControls | None = None, force_dry_run: bool = False) -> str:
+    from sky_music.parser import parse_song_file
+    from sky_music.scheduler import build_key_actions
+    from sky_music.backend import WinSendInputBackend, DryRunBackend
+    from sky_music.playback import PlaybackEngine
+    from ui import ProgressRenderer
 
-    song = song_data[0]
-    scan_code_batches = song["__scan_code_batches"]
-    playback_meta = build_playback_events(scan_code_batches)
-    playback_events = playback_meta["events"]
-    start_time = time.perf_counter()
-    pause_time = 0.0
-    manual_pause_started_at = None
-    focus_pause_started_at = None
-    total_time = song["__total_time"]
-    song_name = song["__name"]
-    active_down_keys = set()
-    active_down_started_at = {}
+    try:
+        song = parse_song_file(selected_song)
+    except Exception as exc:
+        print(f"Failed to parse song: {exc}")
+        return PLAYBACK_QUIT
+
+    is_dry_run = DRY_RUN_MODE or force_dry_run
+
+    # Check window/readiness only if we are NOT running dry-run mode
+    if not is_dry_run:
+        if not ensure_sky_ready():
+            return PLAYBACK_QUIT
+        if controls is not None and controls.enabled:
+            print(f"Controls: {controls.hint()}")
+        countdown_before_playback(countdown_seconds)
+    else:
+        print(f"[simulation] DRY-RUN enabled. Simulating playback of {song.name}...")
+
+    # Build scheduled actions using specified TimingPolicy and selected mode
+    sched_meta = build_key_actions(song, policy=TIMING_POLICY, scan_code_mode=CURRENT_SCAN_CODE_MODE)
+    actions = sched_meta["actions"]
+
+    backend = DryRunBackend() if is_dry_run else WinSendInputBackend()
     renderer = ProgressRenderer(controls)
-    delayed_keyups = 0
-    late_events_over_2ms = 0
-    late_events_over_5ms = 0
-    late_events_over_10ms = 0
-    forced_repeat_releases = 0
-    skipped_stale_keyups = 0
-    short_hold_released = 0
-    max_lateness = 0.0
-
-    def get_elapsed_time():
-        now = time.perf_counter()
-        elapsed = now - start_time - pause_time
-        if manual_pause_started_at is not None:
-            elapsed -= now - manual_pause_started_at
-        if focus_pause_started_at is not None:
-            elapsed -= now - focus_pause_started_at
-        return max(0.0, elapsed)
-
-    def sleep_for_playback(remaining_time):
-        if remaining_time > 0.05:
-            time.sleep(min(PLAYBACK_POLL_SECONDS, max(0.001, remaining_time - 0.01)))
-        elif remaining_time > 0.005:
-            time.sleep(0.001)
-        else:
-            time.sleep(0)
-
-    debug_log(
-        f"Start song: {song_name} | batches={len(scan_code_batches)} | events={len(playback_events)}"
+    
+    engine = PlaybackEngine(
+        song=song,
+        actions=actions,
+        backend=backend,
+        controls=controls,
+        renderer=renderer,
+        telemetry_enabled=TELEMETRY_CSV_ENABLED or PLAYBACK_DEBUG or force_dry_run,
+        require_focus=not is_dry_run
     )
+    return engine.play()
 
-    renderer.render(0.0, total_time, song_name, status="playing", force=True)
 
-    try:
-        for current_time, _priority, current_scan_codes, is_key_up, enforce_min_hold in playback_events:
-            while True:
-                command = controls.poll() if controls is not None else None
-                now = time.perf_counter()
-
-                if command == "quit":
-                    renderer.finish(f"Stopped: {song_name}")
-                    return PLAYBACK_QUIT
-
-                if command == "skip":
-                    renderer.finish(f"Skipped: {song_name}")
-                    return PLAYBACK_SKIPPED
-
-                if command == "refocus":
-                    focusWindow()
-                    renderer.render(get_elapsed_time(), total_time, song_name, status="refocus", force=True)
-
-                if command == "pause":
-                    if manual_pause_started_at is None:
-                        release_active_keys(active_down_keys, active_down_started_at)
-                        manual_pause_started_at = now
-                        renderer.render(get_elapsed_time(), total_time, song_name, status="paused", force=True)
-                        if PLAYBACK_DEBUG:
-                            debug_log("[control] manual pause")
-                    else:
-                        pause_time += now - manual_pause_started_at
-                        manual_pause_started_at = None
-                        renderer.render(get_elapsed_time(), total_time, song_name, status="playing", force=True)
-                        if PLAYBACK_DEBUG:
-                            debug_log("[control] manual resume")
-
-                if manual_pause_started_at is not None:
-                    renderer.render(get_elapsed_time(), total_time, song_name, status="paused")
-                    time.sleep(PLAYBACK_POLL_SECONDS)
-                    continue
-
-                if not is_sky_active():
-                    release_active_keys(active_down_keys, active_down_started_at)
-                    flush_debug_log()
-
-                    if focus_pause_started_at is None:
-                        focus_pause_started_at = time.perf_counter()
-                        if PLAYBACK_DEBUG:
-                            debug_log("[window] focus lost, playback paused")
-
-                    renderer.render(get_elapsed_time(), total_time, song_name, status="focus_lost")
-                    time.sleep(PLAYBACK_POLL_SECONDS)
-                    continue
-
-                if focus_pause_started_at is not None:
-                    pause_time += time.perf_counter() - focus_pause_started_at
-                    focus_pause_started_at = None
-                    renderer.render(get_elapsed_time(), total_time, song_name, status="playing", force=True)
-                    if PLAYBACK_DEBUG:
-                        debug_log("[window] focus restored, playback resumed")
-
-                elapsed_time = get_elapsed_time()
-                if elapsed_time >= current_time:
-                    break
-
-                renderer.render(elapsed_time, total_time, song_name, status="playing")
-                sleep_for_playback(current_time - elapsed_time)
-
-            lateness = elapsed_time - current_time
-            if lateness > 0:
-                max_lateness = max(max_lateness, lateness)
-                if lateness > 0.002:
-                    late_events_over_2ms += 1
-                if lateness > 0.005:
-                    late_events_over_5ms += 1
-                if lateness > 0.010:
-                    late_events_over_10ms += 1
-                    if PLAYBACK_DEBUG:
-                        debug_log(
-                            f"[timing] late event by {lateness:.4f}s | "
-                            f"key_up={is_key_up} | scan_codes={current_scan_codes}"
-                        )
-
-            if is_key_up:
-                current_scan_codes = tuple(
-                    scan_code for scan_code in current_scan_codes
-                    if scan_code in active_down_keys
-                )
-                if not current_scan_codes:
-                    skipped_stale_keyups += 1
-                    if PLAYBACK_DEBUG:
-                        debug_log("[input] skipped stale key-up")
-                    continue
-
-                if enforce_min_hold:
-                    earliest_release_time = max(
-                        active_down_started_at.get(scan_code, elapsed_time) + MIN_KEY_HOLD_SECONDS
-                        for scan_code in current_scan_codes
-                    )
-                    if elapsed_time < earliest_release_time:
-                        delay = earliest_release_time - elapsed_time
-                        delayed_keyups += 1
-                        if PLAYBACK_DEBUG:
-                            debug_log(f"[timing] delayed key-up by {delay:.4f}s")
-                        wait_seconds(delay)
-                else:
-                    actual_holds = [
-                        elapsed_time - active_down_started_at.get(scan_code, elapsed_time)
-                        for scan_code in current_scan_codes
-                    ]
-                    if any(h < MIN_KEY_HOLD_SECONDS for h in actual_holds):
-                        short_hold_released += 1
-                        if PLAYBACK_DEBUG:
-                            debug_log(f"[input] allowed short-hold release below min-hold: {actual_holds}")
-            else:
-                repeated_scan_codes = tuple(
-                    scan_code for scan_code in current_scan_codes
-                    if scan_code in active_down_keys
-                )
-                if repeated_scan_codes:
-                    forced_repeat_releases += 1
-                    if PLAYBACK_DEBUG:
-                        debug_log(f"[input] forced release before repeat: {repeated_scan_codes}")
-                    send_scan_code_batch(repeated_scan_codes, key_up=True)
-                    active_down_keys.difference_update(repeated_scan_codes)
-                    for scan_code in repeated_scan_codes:
-                        active_down_started_at.pop(scan_code, None)
-                    wait_seconds(REPEAT_RELEASE_GAP_SECONDS)
-
-            send_scan_code_batch(current_scan_codes, key_up=is_key_up)
-            actual_elapsed_time = get_elapsed_time()
-            if is_key_up:
-                active_down_keys.difference_update(current_scan_codes)
-                for scan_code in current_scan_codes:
-                    active_down_started_at.pop(scan_code, None)
-            else:
-                active_down_keys.update(current_scan_codes)
-                for scan_code in current_scan_codes:
-                    active_down_started_at[scan_code] = actual_elapsed_time
-
-        renderer.render(total_time, total_time, song_name, status="done", force=True)
-        renderer.finish(f"Finished playing {song_name}")
-        if PLAYBACK_DEBUG:
-            debug_log(
-                f"Timing summary: compressed holds={playback_meta['compressed_holds']}, "
-                f"impossible same-key repeats={playback_meta.get('impossible_same_key_repeats', 0)}, "
-                f"delayed key-ups={delayed_keyups}, "
-                f"late events over 2ms={late_events_over_2ms}, "
-                f"late events over 5ms={late_events_over_5ms}, "
-                f"late events over 10ms={late_events_over_10ms}, "
-                f"max lateness={max_lateness:.6f}s, "
-                f"forced repeat releases={forced_repeat_releases}, "
-                f"skipped stale key-ups={skipped_stale_keyups}, "
-                f"short-holds released={short_hold_released}"
-            )
-        return PLAYBACK_FINISHED
-    finally:
-        debug_log(f"End song: {song_name}")
-        release_active_keys(active_down_keys, active_down_started_at)
-        flush_debug_log()
-
-def play_selected_song(selected_song, countdown_seconds, controls=None):
-    song_data = load_song_data(selected_song)
-    if song_data is None:
-        return PLAYBACK_QUIT
-    if not ensure_sky_ready():
-        return PLAYBACK_QUIT
-    if controls is not None and controls.enabled:
-        print(f"Controls: {controls.hint()}")
-    countdown_before_playback(countdown_seconds)
-    return play_music(song_data, controls=controls)
-
-def run_doctor(scan_code_mode):
-    print("Terminal doctor")
-    print(f"Python: {sys.version.split()[0]}")
-    print(f"Platform: {sys.platform}")
-    print(f"Songs dir: {SONG_DIR.resolve()}")
-    print(f"Supported files: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
-
-    song_choices = get_song_choices(force_refresh=True)
-    print(f"Detected songs: {len(song_choices)}")
-    if song_choices:
-        print(f"First song: {song_choices[0].name}")
-
-    try:
-        test_scan_codes = build_note_scan_codes(key_maps, scan_code_mode=scan_code_mode)
-        print(f"Key mapping: OK ({len(test_scan_codes)} mapped keys)")
-    except Exception as exc:
-        print(f"Key mapping: FAILED ({exc})")
-
-    try:
-        detected_window = get_sky_window()
-        print(f"Sky window: {'OK' if detected_window else 'NOT FOUND'}")
-    except Exception as exc:
-        print(f"Sky window check: FAILED ({exc})")
 
 def build_arg_parser():
     parser = argparse.ArgumentParser(
@@ -360,7 +154,17 @@ def build_arg_parser():
     parser.add_argument(
         "--doctor",
         action="store_true",
-        help="check songs folder, key mapping, and Sky window detection",
+        help="run complete clinical diagnostic system check",
+    )
+    parser.add_argument(
+        "--doctor-timing",
+        action="store_true",
+        help="diagnose high-precision multimedia timers on Windows",
+    )
+    parser.add_argument(
+        "--doctor-input",
+        action="store_true",
+        help="diagnose layout configurations and active depressed note keys conflicts",
     )
     parser.add_argument(
         "--debug-playback",
@@ -419,19 +223,96 @@ def build_arg_parser():
         default=None,
         help="TUI selection menu theme: aurora, minimalist, slate, cyberpunk, or classic (Default: saved or aurora)",
     )
+    parser.add_argument(
+        "--timing-profile",
+        choices=["fast", "balanced", "conservative"],
+        default="balanced",
+        help="Select timing profile (Default: balanced)",
+    )
+    parser.add_argument(
+        "--hold-ms",
+        type=int,
+        help="Override key hold duration (in milliseconds)",
+    )
+    parser.add_argument(
+        "--min-hold-ms",
+        type=int,
+        help="Override absolute minimum key hold duration (in milliseconds)",
+    )
+    parser.add_argument(
+        "--release-gap-ms",
+        type=int,
+        help="Override release gap (in milliseconds)",
+    )
+    parser.add_argument(
+        "--repeat-release-gap-ms",
+        type=int,
+        help="Override gap before same-key repeats (in milliseconds)",
+    )
+    parser.add_argument(
+        "--debug-csv",
+        action="store_true",
+        help="Write high-precision timing CSV telemetry reports to logs/",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run playback purely inside mock memory, without sending physical OS keystrokes (useful for timing diagnosis)",
+    )
     return parser
 
-def configure_from_args(args):
-    global PLAYBACK_DEBUG, DEBUG_LOG_PATH
+def configure_from_args(args: argparse.Namespace) -> None:
+    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE
     import inputs
     import songs
+    from sky_music.scheduler import TimingPolicy
 
+    CURRENT_SCAN_CODE_MODE = args.scan_code_mode
     songs.SONG_DIR = args.songs_dir
     PLAYBACK_DEBUG = args.debug_playback
     inputs.PLAYBACK_DEBUG = args.debug_playback
+    TELEMETRY_CSV_ENABLED = args.debug_csv
+    DRY_RUN_MODE = args.dry_run
 
     if PLAYBACK_DEBUG:
         init_debug_log()
+
+    # Determine base TimingPolicy from profile
+    profile = args.timing_profile
+    if profile == "fast":
+        policy = TimingPolicy(
+            hold_us=16_000,
+            min_hold_us=8_000,
+            release_gap_us=2_000,
+            repeat_release_gap_us=2_000
+        )
+    elif profile == "conservative":
+        policy = TimingPolicy(
+            hold_us=34_000,
+            min_hold_us=16_000,
+            release_gap_us=5_000,
+            repeat_release_gap_us=3_000
+        )
+    else: # balanced
+        policy = TimingPolicy(
+            hold_us=24_000,
+            min_hold_us=12_000,
+            release_gap_us=3_000,
+            repeat_release_gap_us=2_000
+        )
+
+    # Perform overrides from arguments
+    hold_us = args.hold_ms * 1000 if args.hold_ms is not None else policy.hold_us
+    min_hold_us = args.min_hold_ms * 1000 if args.min_hold_ms is not None else policy.min_hold_us
+    release_gap_us = args.release_gap_ms * 1000 if args.release_gap_ms is not None else policy.release_gap_us
+    repeat_release_gap_us = args.repeat_release_gap_ms * 1000 if args.repeat_release_gap_ms is not None else policy.repeat_release_gap_us
+    
+    TIMING_POLICY = TimingPolicy(
+        hold_us=hold_us,
+        min_hold_us=min_hold_us,
+        release_gap_us=release_gap_us,
+        repeat_release_gap_us=repeat_release_gap_us
+    )
 
     if args.sky_process_names:
         inputs.EXPECTED_PROCESS_NAMES = {
@@ -445,10 +326,7 @@ def configure_from_args(args):
         songs.ACTIVE_THEME = args.theme
         songs.save_theme(args.theme)
 
-    NOTE_SCAN_CODES.clear()
-    NOTE_SCAN_CODES.update(build_note_scan_codes(key_maps, scan_code_mode=args.scan_code_mode))
-
-def build_playback_controls(args):
+def build_playback_controls(args: argparse.Namespace) -> PlaybackControls:
     if args.disable_hotkeys:
         return PlaybackControls(
             pause=parse_hotkey(args.pause_key),
@@ -480,7 +358,7 @@ def build_playback_controls(args):
         )
     return controls
 
-def prompt_song_selection():
+def prompt_song_selection() -> Path | None:
     import songs
     if songs.HAS_PROMPT_TOOLKIT:
         return songs.choose_song_interactively()
@@ -507,7 +385,7 @@ def prompt_song_selection():
             return selected_song
         print("")
 
-def print_choices_local(song_choices):
+def print_choices_local(song_choices: list[Path]) -> None:
     if not song_choices:
         print(f"No songs found in: {SONG_DIR.resolve()}")
         print(f"Supported extensions: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
@@ -516,7 +394,7 @@ def print_choices_local(song_choices):
     for index, path in enumerate(song_choices, start=1):
         print(f"  {index:>2}) {path.stem}")
 
-def main():
+def main() -> int:
     if sys.platform == 'win32':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
@@ -532,8 +410,26 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
 
-    if args.doctor:
-        run_doctor(args.scan_code_mode)
+    if args.doctor or args.doctor_timing or args.doctor_input:
+        import sky_music.doctor as doctor
+        if args.doctor:
+            doctor.run_all_doctor_checks()
+        elif args.doctor_timing:
+            print("=" * 60)
+            print("             SKY TIMING DOCTOR")
+            print("=" * 60)
+            diag = doctor.check_timer_resolution()
+            print(f"Status: {'OK' if diag['ok'] else 'FAILED'}\nDetails: {diag['msg']}")
+            print("=" * 60)
+        elif args.doctor_input:
+            print("=" * 60)
+            print("             SKY INPUT DOCTOR")
+            print("=" * 60)
+            kb_diag = doctor.check_keyboard_layout()
+            conflict_diag = doctor.check_physical_keys_held()
+            print(f"Layout Mapping : {'OK' if kb_diag['ok'] else 'FAILED'} - {kb_diag['msg']}")
+            print(f"Key Conflicts  : {'OK' if conflict_diag['ok'] else 'WARNING'} - {conflict_diag['msg']}")
+            print("=" * 60)
         return 0
 
     song_choices = get_song_choices(force_refresh=True)
@@ -558,6 +454,8 @@ def main():
             for run_index in range(repeat_count):
                 if repeat_count > 1:
                     print(f"Run {run_index + 1}/{repeat_count}: {selected_song.stem}")
+                if not args.no_clear:
+                    clear_terminal()
                 result = play_selected_song(selected_song, args.countdown, controls=controls)
                 if result == PLAYBACK_QUIT:
                     return 0
@@ -569,6 +467,9 @@ def main():
             selected_song = prompt_song_selection()
             if selected_song is None:
                 return 0
+
+            if not args.no_clear:
+                clear_terminal()
 
             result = play_selected_song(selected_song, args.countdown, controls=controls)
             if result == PLAYBACK_QUIT:
