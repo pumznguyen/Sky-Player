@@ -28,7 +28,8 @@ from songs import (
     get_song_choices,
     resolve_song_selection,
     countdown_before_playback,
-    ensure_sky_ready
+    ensure_sky_ready,
+    SongPickerResult,
 )
 
 PLAYBACK_DEBUG = False
@@ -142,32 +143,34 @@ def _handle_risk_analysis(report, song, is_dry_run: bool, controls, policy_overr
 
 
 def _mini_preflight(is_dry_run: bool) -> bool:
-    """Silent preflight check before real playback. Prints status and returns True if ready."""
+    """Preflight check before real playback — uniform box-style output."""
     if is_dry_run:
         return True
 
     import sky_music.doctor as doctor
-    print()
-    print("  Preflight:")
+    checks: list[tuple[bool, str]] = []
 
     # 1. Sky window
     win = doctor.check_sky_window()
-    print(f"  [{'OK' if win['ok'] else 'FAIL'}] Sky window: {win['msg'] if not win['ok'] else 'detected'}")
+    checks.append((win["ok"], "Sky window detected" if win["ok"] else f"Sky not found: {win['msg']}"))
     if not win["ok"]:
+        print()
+        print("  ╭─ Readiness ────────────────────────────────────────────────")
+        print(f"  │  ✗ Sky not found: {win['msg']}")
+        print(  "  ╰" + "─" * 56)
         while True:
             try:
-                choice = input("  Sky not found. [R] retry  [D] dry-run  [Esc/Enter] cancel: ").strip().casefold()
+                choice = input("  Sky not found. [R] retry  [D] dry-run  [Enter] cancel: ").strip().casefold()
             except (EOFError, KeyboardInterrupt):
                 return False
             if choice == "r":
                 win = doctor.check_sky_window()
                 if win["ok"]:
-                    print("  [OK ] Sky window: detected")
+                    checks[0] = (True, "Sky window detected")
                     break
-                print(f"  [FAIL] Still not found: {win['msg']}")
+                print(f"  ✗ Still not found: {win['msg']}")
             elif choice == "d":
-                # Caller will see dry_run flag is unchanged; we signal via print only
-                print("  → Use --dry-run flag to simulate without Sky.")
+                print("  → Use --dry-run to simulate without Sky.")
                 return False
             else:
                 return False
@@ -175,19 +178,29 @@ def _mini_preflight(is_dry_run: bool) -> bool:
     # 2. Focus
     import inputs as _inputs
     _inputs.focusWindow()
-    print("  [OK ] Focus: requested")
+    checks.append((True, "Focus requested"))
 
     # 3. Timer
     timer = doctor.check_timer_resolution()
-    print(f"  [{'OK' if timer['ok'] else 'WARN'}] Timer: {'high-precision timers active' if timer['ok'] else timer['msg']}")
+    checks.append((timer["ok"], "High-precision timers active" if timer["ok"] else timer["msg"]))
 
     # 4. Key conflicts
     keys = doctor.check_physical_keys_held()
-    if keys["ok"]:
-        print("  [OK ] No note keys held")
-    else:
-        print(f"  [WARN] Keys held: {', '.join(keys['held_keys'])} — release before playback")
+    checks.append((keys["ok"], "No note keys held" if keys["ok"] else f"Keys held: {', '.join(keys.get('held_keys', []))}"))
 
+    # Render uniform box
+    print()
+    print("  ╭─ Readiness ────────────────────────────────────────────────")
+    row: list[str] = []
+    for ok, msg in checks:
+        icon = "✓" if ok else "⚠"
+        row.append(f"{icon} {msg}")
+        if len(row) == 2:
+            print(f"  │  {row[0]:<28}  {row[1]}")
+            row = []
+    if row:
+        print(f"  │  {row[0]}")
+    print(  "  ╰" + "─" * 56)
     print()
     return True
 
@@ -232,7 +245,14 @@ def _print_post_run_report(engine, profile_name: str, tempo_scale: float) -> Non
     print()
 
 
-def play_selected_song(selected_song: Path, countdown_seconds: int, controls: PlaybackControls | None = None, force_dry_run: bool = False) -> str:
+def play_selected_song(
+    selected_song: Path,
+    countdown_seconds: int,
+    controls: PlaybackControls | None = None,
+    force_dry_run: bool = False,
+    force_profile: str | None = None,
+    force_tempo: float | None = None,
+) -> str:
     from sky_music.parser import parse_song_file
     from sky_music.scheduler import build_key_actions
     from sky_music.backend import WinSendInputBackend, DryRunBackend
@@ -246,18 +266,20 @@ def play_selected_song(selected_song: Path, countdown_seconds: int, controls: Pl
         return PLAYBACK_QUIT
 
     is_dry_run = DRY_RUN_MODE or force_dry_run
-    current_profile = TIMING_PROFILE_NAME
-    current_tempo = TEMPO_SCALE
+    # Picker decision overrides global config (advisory-only flow)
+    current_profile = force_profile if force_profile is not None else TIMING_PROFILE_NAME
+    current_tempo   = force_tempo   if force_tempo   is not None else TEMPO_SCALE
 
     # Build scheduled actions using specified TimingPolicy and selected mode
     sched_meta = build_key_actions(song, policy=TIMING_POLICY, scan_code_mode=CURRENT_SCAN_CODE_MODE, tempo_scale=current_tempo)
     actions = sched_meta.actions
 
-    # Pre-playback schedule risk analysis
+    # Pre-playback schedule risk analysis (advisory only — do NOT auto-apply)
     from sky_music.analyzer import analyze_schedule
     report = analyze_schedule(sched_meta)
 
-    if report.severity != "low":
+    # If picker already decided (force_profile/tempo supplied), skip the prompt
+    if report.severity != "low" and force_profile is None and force_tempo is None:
         should_continue, new_profile, new_tempo = _handle_risk_analysis(
             report, song, is_dry_run, controls
         )
@@ -620,14 +642,21 @@ def build_playback_controls(args: argparse.Namespace) -> PlaybackControls:
         )
     return controls
 
-def prompt_song_selection() -> Path | None:
+def prompt_song_selection(
+    profile: str = "balanced",
+    tempo: float = 1.0,
+    dry_run: bool = False,
+) -> "songs.SongPickerResult | None":
     import songs
     if songs.HAS_PROMPT_TOOLKIT:
-        return songs.choose_song_interactively()
+        return songs.choose_song_interactively(
+            initial_profile=profile,
+            initial_tempo=tempo,
+            initial_dry_run=dry_run,
+        )
 
-    # Chế độ dự phòng (Fallback) nếu môi trường không có prompt_toolkit
+    # Fallback CLI mode (no prompt_toolkit)
     song_choices = get_song_choices(force_refresh=True)
-    songs.print_song_choices = lambda choices: print_choices_local(choices)
     print_choices_local(song_choices)
 
     while True:
@@ -644,7 +673,12 @@ def prompt_song_selection() -> Path | None:
 
         selected_song = resolve_song_selection(selection, song_choices)
         if selected_song is not None:
-            return selected_song
+            return songs.SongPickerResult(
+                song_path=selected_song,
+                action="dry_run" if dry_run else "play",
+                profile_name=profile,
+                tempo_scale=tempo,
+            )
         print("")
 
 def print_choices_local(song_choices: list[Path]) -> None:
@@ -736,14 +770,26 @@ def main() -> int:
             return 0
 
         while True:
-            selected_song = prompt_song_selection()
-            if selected_song is None:
+            picker_result = prompt_song_selection(
+                profile=TIMING_PROFILE_NAME,
+                tempo=TEMPO_SCALE,
+                dry_run=DRY_RUN_MODE,
+            )
+            if picker_result is None:
                 return 0
 
             if not args.no_clear:
                 clear_terminal()
 
-            result = play_selected_song(selected_song, args.countdown, controls=controls)
+            force_dry = (picker_result.action == "dry_run")
+            result = play_selected_song(
+                picker_result.song_path,
+                args.countdown,
+                controls=controls,
+                force_dry_run=force_dry,
+                force_profile=picker_result.profile_name,
+                force_tempo=picker_result.tempo_scale,
+            )
             if result == PLAYBACK_QUIT:
                 return 0
             if result == PLAYBACK_SKIPPED:

@@ -1,7 +1,8 @@
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 import inputs
 
 SONG_DIR: Path = Path("songs")
@@ -314,7 +315,45 @@ def truncate_text(text: str, max_width: int) -> str:
     return text[: max_width - 1] + "…"
 
 
-def choose_song_interactively(theme_name: str | None = None) -> Path | None:
+@dataclass(frozen=True, slots=True)
+class SongPickerResult:
+    """Carries the user's confirmed decision from the song picker."""
+    song_path: Path
+    action: Literal["play", "dry_run"]
+    profile_name: str
+    tempo_scale: float
+
+
+def _get_song_recommendation(song_path: Path) -> tuple[str, float]:
+    """Return (recommended_profile, recommended_tempo) for a song. Best-effort; returns ('balanced', 1.0) on error."""
+    try:
+        from sky_music.parser import parse_song_file
+        from sky_music.scheduler import build_key_actions, TimingPolicy
+        from sky_music.analyzer import analyze_schedule
+        song = parse_song_file(song_path)
+        policy = TimingPolicy(
+            hold_us=24_000, min_hold_us=12_000,
+            release_gap_us=3_000, repeat_release_gap_us=2_000
+        )
+        sched = build_key_actions(song, policy=policy, scan_code_mode="physical", tempo_scale=1.0)
+        report = analyze_schedule(sched)
+        has_repeats = report.impossible_same_key_repeats > 0
+        high_poly = report.max_polyphony >= 5
+        if report.severity == "high":
+            return ("dense-safe" if has_repeats else "remote-safe"), 0.92
+        if report.severity == "medium":
+            return ("remote-safe" if high_poly else "balanced"), 0.95
+        return "balanced", 1.0
+    except Exception:
+        return "balanced", 1.0
+
+
+def choose_song_interactively(
+    theme_name: str | None = None,
+    initial_profile: str = "balanced",
+    initial_tempo: float = 1.0,
+    initial_dry_run: bool = False,
+) -> "SongPickerResult | None":
     if not HAS_PROMPT_TOOLKIT:
         return None
 
@@ -332,10 +371,16 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
     song_indices = {path: idx for idx, path in enumerate(song_choices, start=1)}
     selected_index = 0
     filtered_songs = list(song_choices)
-    result_window_height = 12
+    result_window_height = 10
+
+    # Picker-level playback state
+    current_profile: str = initial_profile
+    current_tempo: float = initial_tempo
+    dry_run_mode: bool = initial_dry_run
+    risk_hint: str = ""  # set by 'R' or pre-computed for footer
 
     search_field = TextArea(
-        prompt=[("class:prompt", "Search song: ")],
+        prompt=[("class:prompt", "Search  ")],
         multiline=False,
         style="class:input",
     )
@@ -346,8 +391,8 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
 
     header_window = Window(content=header_control, height=3)
     results_window = Window(content=results_control, height=result_window_height, style="class:results")
-    detail_window = Window(content=detail_control, height=2, style="class:detail")
-    footer_window = Window(content=footer_control, height=1, style="class:footer")
+    detail_window = Window(content=detail_control, height=3, style="class:detail")
+    footer_window = Window(content=footer_control, height=2, style="class:footer")
 
     layout = Layout(
         HSplit([
@@ -363,8 +408,11 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
 
     def build_header_text() -> list[tuple[str, str]]:
         terminal_width = max(48, shutil.get_terminal_size((80, 24)).columns)
-        title = " SKY MUSIC PICKER "
-        meta = f" {len(song_choices)} songs • theme: {current_theme_name} "
+        title = " SKY MUSIC HELPER "
+        dry_label = "dry-run: ON " if dry_run_mode else ""
+        meta = f" {len(song_choices)} songs  │  {current_theme_name} theme  │  {current_profile} profile  │  {current_tempo:.2f}x tempo"
+        if dry_label:
+            meta = f"  ⚠ DRY-RUN MODE  │" + meta
         divider = "─" * min(terminal_width, 96)
         return [
             ("class:title", title),
@@ -373,18 +421,36 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
         ]
 
     def build_footer_text() -> list[tuple[str, str]]:
-        return [
-            ("class:key", "↑/↓"),
-            ("class:footer", " move  "),
+        lines: list[tuple[str, str]] = []
+        # Line 1: risk warning if present
+        if risk_hint:
+            sev = "HIGH" if "HIGH" in risk_hint.upper() else ("MED" if "MED" in risk_hint.upper() else "")
+            warn_style = "class:key" if sev == "HIGH" else "class:muted"
+            lines.append((warn_style, risk_hint[:100] + "\n"))
+        else:
+            lines.append(("class:muted", "\n"))
+        # Line 2: action hints
+        lines += [
             ("class:key", "Enter"),
             ("class:footer", " play  "),
+            ("class:key", "Space"),
+            ("class:footer", " quick-play  "),
+            ("class:key", "P"),
+            ("class:footer", " profile  "),
+            ("class:key", "T"),
+            ("class:footer", " tempo  "),
+            ("class:key", "R"),
+            ("class:footer", " apply rec  "),
+            ("class:key", "D"),
+            ("class:footer", " dry-run  "),
             ("class:key", "Ctrl+T"),
             ("class:footer", " theme  "),
-            ("class:key", "Esc"),
-            ("class:footer", " quit  "),
             ("class:key", "Ctrl+R"),
-            ("class:footer", " refresh"),
+            ("class:footer", " refresh  "),
+            ("class:key", "Esc"),
+            ("class:footer", " quit"),
         ]
+        return lines
 
     def filter_songs(query: str) -> list[Path]:
         if not query:
@@ -470,12 +536,18 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
         orig_idx = song_indices[selected_song]
         total_matches = len(filtered_songs)
         query_label = query_text if query_text else "all songs"
-        path_label = truncate_text(str(selected_song), max(40, shutil.get_terminal_size((80, 24)).columns - 12))
+        terminal_width = max(40, shutil.get_terminal_size((80, 24)).columns)
+        path_label = truncate_text(str(selected_song), max(40, terminal_width - 12))
+        # Show recommendation if available
+        rec_profile, rec_tempo = _get_song_recommendation(selected_song) if filtered_songs else ("balanced", 1.0)
+        rec_label = f"{rec_profile} {rec_tempo:.2f}x" if (rec_profile != current_profile or abs(rec_tempo - current_tempo) > 0.005) else "current settings"
         return [
             ("class:detail_label", " Selected "),
-            ("class:detail", f"#{orig_idx} of {len(song_choices)} • {total_matches} match(es) • query: {query_label}\n"),
+            ("class:detail", f"#{orig_idx} of {len(song_choices)} │ {total_matches} match(es) │ query: {query_label}\n"),
             ("class:detail_label", " File     "),
-            ("class:detail", path_label),
+            ("class:detail", path_label + "\n"),
+            ("class:detail_label", " Rec      "),
+            ("class:muted", f"{rec_label}  (press R to apply)"),
         ]
 
     def update_ui() -> None:
@@ -515,16 +587,68 @@ def choose_song_interactively(theme_name: str | None = None) -> Path | None:
     @kb.add("enter")
     def accept_selection(event):
         if filtered_songs:
-            event.app.exit(result=filtered_songs[selected_index])
+            event.app.exit(result=SongPickerResult(
+                song_path=filtered_songs[selected_index],
+                action="dry_run" if dry_run_mode else "play",
+                profile_name=current_profile,
+                tempo_scale=current_tempo,
+            ))
         else:
             event.app.exit(result=None)
+
+    @kb.add("space")
+    def quick_play(event):
+        """Quick-play: play immediately with current config (same as Enter)."""
+        if filtered_songs:
+            event.app.exit(result=SongPickerResult(
+                song_path=filtered_songs[selected_index],
+                action="dry_run" if dry_run_mode else "play",
+                profile_name=current_profile,
+                tempo_scale=current_tempo,
+            ))
+
+    @kb.add("d")
+    def toggle_dry_run(event):
+        nonlocal dry_run_mode
+        dry_run_mode = not dry_run_mode
+        update_ui()
+
+    @kb.add("p")
+    def cycle_profile(event):
+        """Cycle through timing profiles (P key)."""
+        nonlocal current_profile
+        profiles = ["balanced", "remote-safe", "dense-safe", "local-precise", "fast", "conservative"]
+        try:
+            idx = profiles.index(current_profile)
+        except ValueError:
+            idx = 0
+        current_profile = profiles[(idx + 1) % len(profiles)]
+        update_ui()
+
+    @kb.add("t")
+    def cycle_tempo(event):
+        """Cycle through preset tempo values (T key)."""
+        nonlocal current_tempo
+        presets = [0.85, 0.90, 0.92, 0.95, 1.00, 1.05, 1.10]
+        nearest = min(range(len(presets)), key=lambda i: abs(presets[i] - current_tempo))
+        current_tempo = presets[(nearest + 1) % len(presets)]
+        update_ui()
+
+    @kb.add("r")
+    def apply_recommended(event):
+        """Apply recommended profile+tempo for selected song (R key)."""
+        nonlocal current_profile, current_tempo, risk_hint
+        if filtered_songs:
+            rec_profile, rec_tempo = _get_song_recommendation(filtered_songs[selected_index])
+            current_profile = rec_profile
+            current_tempo = rec_tempo
+            risk_hint = f"Applied: {rec_profile} {rec_tempo:.2f}x"
+        update_ui()
 
     @kb.add("escape")
     @kb.add("c-c")
     def cancel(event):
         event.app.exit(result=None)
-
-
 
     @kb.add("c-r")
     def reload_songs(event):
