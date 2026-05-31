@@ -18,3 +18,9 @@ Coding rules:
 - Avoid globals in new code.
 - Scheduler must be pure and unit-testable.
 - Windows backend must be isolated behind an interface.
+
+Workflow rules:
+- Use `uv run <command>` for all Python executions (run, test, lint, typecheck).
+- Do NOT use `pip install` inside .venv; use `uv add <package>` or `uv add --dev <package>`.
+- Use `uv sync` to install/update project dependencies.
+- Do NOT manually activate .venv in scripts or CI; `uv run` handles it.
