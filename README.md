@@ -1,6 +1,6 @@
 # 🎵 Sky Children of the Light: PC Precision Music Player
 
-An automatic music player designed for **Sky: Children of the Light** on PC. It reads JSON or skysheet song files downloaded from specy/skyMusic and simulates keyboard keypresses in real-time.
+An automatic music player designed for **Sky: Children of the Light** on PC. It reads JSON, skysheet, or JSON-compatible txt song files downloaded from specy/skyMusic and simulates keyboard keypresses in real-time.
 
 > [!WARNING]
 > Automatically playing music sheets or using simulated keystrokes might violate Thatgamecompany's Terms of Service. Use this tool responsibly and at your own risk.
@@ -65,7 +65,7 @@ Choose one of the options below to get started:
 ### ➕ Adding More Songs
 
 1. Go to [Sky Music Nightly](https://specy.github.io/skyMusic/).
-2. Download any song in **JSON** or **skysheet** format.
+2. Download any song in **JSON**, **skysheet**, or JSON-compatible **txt** format.
 3. Save the downloaded file inside the `songs/` directory.
 4. Type `r` in the player selection screen to instantly load the new songs!
 

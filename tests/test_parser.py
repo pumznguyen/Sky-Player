@@ -99,4 +99,16 @@ def test_chord_notes_with_same_timestamp_preserved(tmp_song_file):
     assert song.notes[0].time_ms == 100
     assert song.notes[1].time_ms == 100
 
+def test_third_instrument_legacy_key_parses(tmp_song_file):
+    song_data = {
+        "name": "Third Instrument",
+        "songNotes": [
+            {"time": 100, "key": "3Key5"},
+        ]
+    }
+    file = tmp_song_file(song_data)
+    song = parse_song_file(file)
+
+    assert song.notes[0].key == "3Key5"
+
 

@@ -84,7 +84,15 @@ def format_song_row(idx: int, metadata: Any, selected: bool, query: str, pointer
     dur_str = _format_duration(metadata.duration_seconds)
     risk_upper = metadata.risk.upper()[:5]
     
-    risk_style = "fg:#f97316 bold" if risk_upper == "HIGH" else ("fg:#fbbf24 bold" if risk_upper == "MED" or risk_upper == "MEDIUM" else "fg:#10b981")
+    risk_style = (
+        "fg:#ef4444 bold"
+        if risk_upper == "ERROR"
+        else (
+            "fg:#f97316 bold"
+            if risk_upper == "HIGH"
+            else ("fg:#fbbf24 bold" if risk_upper == "MED" or risk_upper == "MEDIUM" else "fg:#10b981")
+        )
+    )
     if selected:
         risk_style = "fg:#ffffff bold"
         

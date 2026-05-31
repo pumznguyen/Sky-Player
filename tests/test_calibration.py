@@ -63,6 +63,25 @@ def test_picker_metadata_loads_song_stats():
     assert meta.duration_seconds > 0
 
 
+def test_picker_metadata_marks_invalid_song_as_error(tmp_path):
+    from sky_music.ui.picker_metadata import get_song_ui_metadata, clear_metadata_cache
+
+    song_file = tmp_path / "bad.json"
+    song_file.write_text(
+        json.dumps({
+            "name": "Bad",
+            "songNotes": [{"time": 0, "key": "InvalidKey"}],
+        }),
+        encoding="utf-8",
+    )
+
+    clear_metadata_cache()
+    meta = get_song_ui_metadata(song_file)
+    assert meta.risk == "error"
+    assert meta.recommended_profile == "unplayable"
+    assert meta.note_count == 0
+
+
 def test_display_profile_name_no_double_fps_suffix():
     from sky_music.config import display_profile_name
 

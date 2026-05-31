@@ -3,7 +3,7 @@ from pathlib import Path
 from sky_music.platform.win32 import inputs
 
 SONG_DIR: Path = Path("songs")
-SUPPORTED_EXTENSIONS: set[str] = {".json", ".skysheet"}
+SUPPORTED_EXTENSIONS: set[str] = {".json", ".skysheet", ".txt"}
 
 _song_choices_cache: list[Path] = []
 _song_choices_mtime_ns: int | None = None

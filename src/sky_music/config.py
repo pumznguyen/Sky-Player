@@ -104,14 +104,14 @@ DEFAULT_TIMING_PROFILES: dict[str, dict[str, Any]] = {
         "focus_restore_grace_us": 100000
     },
     "remote_safe": {
-        "hold_us": 30000,
-        "min_hold_us": 15000,
-        "release_gap_us": 10000,
-        "repeat_release_gap_us": 8000,
+        "hold_us": 48000,
+        "min_hold_us": 24000,
+        "release_gap_us": 18000,
+        "repeat_release_gap_us": 14000,
         "min_scheduled_hold_us": 500,
-        "input_lead_us": 10000,
-        "chord_merge_window_us": 4000,
-        "spin_threshold_us": 200,
+        "input_lead_us": 18000,
+        "chord_merge_window_us": 4500,
+        "spin_threshold_us": 500,
         "focus_restore_grace_us": 150000
     },
     "dense_safe": {

@@ -28,6 +28,16 @@ def test_chord_batching_and_deduplication():
     assert len(down_actions) == 1
     assert set(down_actions[0].scan_codes) == {0x15, 0x16}
 
+def test_third_instrument_key_schedules_as_base_key():
+    song = Song(
+        name="Third Instrument",
+        notes=(Note(time_ms=Millis(1000), key=NoteKey("3Key5")),)
+    )
+    policy = _policy({"input_lead_us": 0})
+    res = build_key_actions(song, policy=policy)
+
+    assert res.actions[0].scan_codes == (0x23,)
+
 def test_same_key_repeat_releases_first():
     """Verify same-key repeat scheduling releases the previous key before hitting the next down."""
     song = Song(

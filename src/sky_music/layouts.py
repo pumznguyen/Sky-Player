@@ -28,6 +28,9 @@ SKY_15_KEY_MAP = {
     '2Key0': 'y', '2Key1': 'u', '2Key2': 'i', '2Key3': 'o', '2Key4': 'p',
     '2Key5': 'h', '2Key6': 'j', '2Key7': 'k', '2Key8': 'l', '2Key9': ';',
     '2Key10': 'n', '2Key11': 'm', '2Key12': ',', '2Key13': '.', '2Key14': '/',
+    '3Key0': 'y', '3Key1': 'u', '3Key2': 'i', '3Key3': 'o', '3Key4': 'p',
+    '3Key5': 'h', '3Key6': 'j', '3Key7': 'k', '3Key8': 'l', '3Key9': ';',
+    '3Key10': 'n', '3Key11': 'm', '3Key12': ',', '3Key13': '.', '3Key14': '/',
 }
 
 SKY_15_KEY_PROFILE = InstrumentProfile(

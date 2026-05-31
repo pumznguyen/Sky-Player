@@ -78,7 +78,7 @@ def build_key_actions(
     drafts = []
     for idx, note in enumerate(song.notes):
         k = note.key
-        if k.startswith("1Key") or k.startswith("2Key"):
+        if k.startswith("1Key") or k.startswith("2Key") or k.startswith("3Key"):
             k = NoteKey("Key" + k[4:])
         
         # Scale to microseconds

@@ -24,6 +24,11 @@ def test_cli_list_argument():
     args = parser.parse_args(["--list"])
     assert args.list is True
 
+def test_txt_song_extension_is_supported():
+    from sky_music.ui.picker_helpers import SUPPORTED_EXTENSIONS
+
+    assert ".txt" in SUPPORTED_EXTENSIONS
+
 def test_cli_fps_argument_applies_timing_policy():
     parser = main.build_arg_parser()
     args = parser.parse_args(["--fps", "60"])

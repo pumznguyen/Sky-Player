@@ -575,14 +575,14 @@ def play_selected_song(
     controls: PlaybackControls | None = None,
     overrides: PlaybackOverrides | None = None,
 ) -> str:
-    from sky_music.domain.parser import parse_song_file
+    from sky_music.domain.song_repository import get_shared_song_repository
     from sky_music.domain.scheduler import build_key_actions, ScheduleBuildError
     from sky_music.infrastructure.backend import WinSendInputBackend, DryRunBackend
     from sky_music.orchestration.engine import PlaybackEngine
     from sky_music.ui.hud import ProgressRenderer
 
     try:
-        song = parse_song_file(selected_song)
+        song = get_shared_song_repository().load(selected_song)
     except Exception as exc:
         print(f"Failed to parse song: {exc}")
         return PLAYBACK_QUIT
@@ -796,7 +796,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--songs-dir",
         type=Path,
         default=SONG_DIR,
-        help="folder containing .json/.skysheet files",
+        help="folder containing .json/.skysheet/.txt song files",
     )
     sel.add_argument(
         "--countdown",

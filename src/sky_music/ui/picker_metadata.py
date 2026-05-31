@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Literal
 
 from sky_music.domain.session_context import PlaybackSessionContext
+from sky_music.domain.song_repository import get_shared_song_repository
 
 @dataclass(frozen=True, slots=True)
 class SongUiMetadata:
@@ -13,7 +14,7 @@ class SongUiMetadata:
     max_polyphony: int
     min_note_gap_ms: float
     min_same_key_gap_ms: float
-    risk: Literal["low", "medium", "high"]
+    risk: Literal["low", "medium", "high", "error"]
     recommended_profile: str
     recommended_tempo_scale: float
     warnings: tuple[str, ...]
@@ -25,6 +26,7 @@ class SongUiMetadata:
     timing_stress_rate: float = 0.0
 
 _metadata_cache: dict[tuple, SongUiMetadata] = {}
+_song_repository = get_shared_song_repository()
 
 def get_song_ui_metadata(
     song_path: Path,
@@ -32,7 +34,6 @@ def get_song_ui_metadata(
 ) -> SongUiMetadata:
     session = session or PlaybackSessionContext.balanced()
     try:
-        from sky_music.domain.parser import parse_song_file
         from sky_music.domain.scheduler import build_key_actions
         from sky_music.domain.analyzer import analyze_schedule
 
@@ -43,7 +44,7 @@ def get_song_ui_metadata(
             from sky_music.layouts import SKY_15_KEY_PROFILE
             resolver = Win32NoteResolver(SKY_15_KEY_PROFILE)
 
-        song = parse_song_file(song_path)
+        song = _song_repository.load(song_path)
         policy = session.resolve_effective_policy()
         sched = build_key_actions(
             song,
@@ -88,8 +89,8 @@ def get_song_ui_metadata(
             max_polyphony=0,
             min_note_gap_ms=0.0,
             min_same_key_gap_ms=0.0,
-            risk="low",
-            recommended_profile="balanced",
+            risk="error",
+            recommended_profile="unplayable",
             recommended_tempo_scale=1.0,
             warnings=(f"Failed to analyze song: {e}",),
             average_notes_per_second=0.0,
@@ -105,13 +106,19 @@ def get_cached_song_ui_metadata(
     session: PlaybackSessionContext | None = None,
 ) -> SongUiMetadata:
     session = session or PlaybackSessionContext.balanced()
-    cache_key = session.metadata_cache_key(song_path)
+    try:
+        song_file_key = _song_repository.cache_key(song_path)
+    except Exception:
+        return get_song_ui_metadata(song_path, session)
+
+    cache_key = session.metadata_cache_key(song_file_key)
     if cache_key not in _metadata_cache:
         _metadata_cache[cache_key] = get_song_ui_metadata(song_path, session)
     return _metadata_cache[cache_key]
 
 def clear_metadata_cache() -> None:
     _metadata_cache.clear()
+    _song_repository.clear()
 
 def _get_song_recommendation(
     song_path: Path,

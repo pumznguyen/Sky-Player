@@ -426,7 +426,11 @@ def choose_song_interactively(
         if state.current_view in {"picker", "preview"}:
             if not state.filtered_songs: return []
             meta = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index], picker_session())
-            risk_style = "fg:#f97316 bold" if meta.risk == "high" else ("fg:#fbbf24 bold" if meta.risk == "medium" else "fg:#10b981")
+            risk_style = (
+                "fg:#ef4444 bold"
+                if meta.risk == "error"
+                else ("fg:#f97316 bold" if meta.risk == "high" else ("fg:#fbbf24 bold" if meta.risk == "medium" else "fg:#10b981"))
+            )
             line1 = [(risk_style, f"{meta.risk.upper()} risk: "), ("class:detail", f"Suggested {meta.recommended_profile} @ {meta.recommended_tempo_scale:.2f}x")]
             
             actions = [
@@ -639,9 +643,6 @@ def choose_song_interactively(
     def _(event):
         if state.current_view == "picker": safe_exit(event.app, None)
         else: state.current_view = "picker"; update_ui()
-
-    for path in song_choices:
-        get_cached_song_ui_metadata(path, picker_session())
 
     update_ui()
     return Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()
