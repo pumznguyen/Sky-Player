@@ -188,9 +188,9 @@ def test_release_collision_delay_separates_up_from_conflicting_down():
 
 
 def test_min_hold_scales_at_30fps():
-    base = TimingPolicy.from_dict({"min_hold_us": 12000})
+    base = TimingPolicy.from_dict({"min_hold_us": 16000})
     frame_policy = FrameTimingPolicy.from_timing_policy(base, fps=30)
-    assert frame_policy.min_hold_us == 16_666
+    assert frame_policy.min_hold_us == 24_999
 
 
 def test_strict_policy_rejects_impossible_repeat():
@@ -286,13 +286,13 @@ def test_none_frame_align_preserves_exact_down_time():
 def test_timing_policy_from_dict_defaults():
     policy = TimingPolicy.from_dict({})
     assert policy.hold_us == 24000
-    assert policy.min_hold_us == 12000
+    assert policy.min_hold_us == 16000
 
 def test_timing_policy_from_profile_name():
     policy = TimingPolicy.from_profile_name("local-precise")
     assert policy.hold_us == 20000
     policy_2 = TimingPolicy.from_profile_name("remote-safe")
-    assert policy_2.hold_us == 30000
+    assert policy_2.hold_us == 35000
 
 def test_frame_timing_policy_from_profile_name():
     from sky_music.domain.scheduler_types import FrameTimingPolicy

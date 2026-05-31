@@ -126,7 +126,7 @@ class FrameTimingPolicy:
         input_lead_min_frame_ratio: float = 0.5,
         release_gap_min_frame_ratio: float = 0.15,
         repeat_release_gap_min_frame_ratio: float = 0.10,
-        min_hold_min_frame_ratio: float = 0.5,
+        min_hold_min_frame_ratio: float = 0.75,
         frame_align: FrameAlignMode = "none",
     ) -> "FrameTimingPolicy":
         if fps is not None and fps > 0:
