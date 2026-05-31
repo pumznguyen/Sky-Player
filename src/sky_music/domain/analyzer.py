@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Literal
-from sky_music.domain.scheduler_types import ScheduleResult
+from sky_music.domain.scheduler_types import ScheduleMetadata
 
 @dataclass(frozen=True, slots=True)
 class DenseCluster:
@@ -58,7 +58,7 @@ def _find_dense_clusters(down_events: list[Any]) -> list[DenseCluster]:
                 ))
     return dense_clusters_list
 
-def _compute_min_gaps(res: ScheduleResult, raw_notes: tuple[Any, ...] | None) -> tuple[int | None, int | None]:
+def _compute_min_gaps(res: ScheduleMetadata, raw_notes: tuple[Any, ...] | None) -> tuple[int | None, int | None]:
     """Compute minimum gap between ANY two notes and SAME physical key."""
     down_events = sorted([action for action in res.actions if action.kind == "down"], key=lambda a: a.at_us)
     n = len(down_events)
@@ -104,7 +104,7 @@ def _compute_min_gaps(res: ScheduleResult, raw_notes: tuple[Any, ...] | None) ->
             
     return raw_min_any_note_gap_us, raw_min_same_key_gap_us
 
-def _evaluate_risk_severity(res: ScheduleResult, dense_clusters_list: list[DenseCluster]) -> tuple[Literal["low", "medium", "high"], list[str], list[str]]:
+def _evaluate_risk_severity(res: ScheduleMetadata, dense_clusters_list: list[DenseCluster]) -> tuple[Literal["low", "medium", "high"], list[str], list[str]]:
     severity: Literal["low", "medium", "high"] = "low"
     recommendations = []
     reasons_list = []
@@ -162,8 +162,8 @@ def _evaluate_risk_severity(res: ScheduleResult, dense_clusters_list: list[Dense
     
     return severity, recommendations, reasons_list
 
-def analyze_schedule(res: ScheduleResult, raw_notes: tuple[Any, ...] | None = None) -> ScheduleRiskReport:
-    """Analyze a ScheduleResult and optional raw notes to detect timing conflicts, density risks, and suggest overrides."""
+def analyze_schedule(res: ScheduleMetadata, raw_notes: tuple[Any, ...] | None = None) -> ScheduleRiskReport:
+    """Analyze a ScheduleMetadata and optional raw notes to detect timing conflicts, density risks, and suggest overrides."""
     down_events = sorted([action for action in res.actions if action.kind == "down"], key=lambda a: a.at_us)
     
     dense_clusters_list = _find_dense_clusters(down_events)

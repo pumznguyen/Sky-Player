@@ -107,7 +107,9 @@ TIMER_RESOLUTION_MS = 1
 _timer_resolution_enabled: bool = False
 
 # Global configuration variables to be updated by main.py
-EXPECTED_PROCESS_NAMES: set[str] = {"Sky.exe", "Sky Children of the Light.exe"}
+from sky_music.config import DEFAULT_SKY_PROCESS_NAMES
+
+EXPECTED_PROCESS_NAMES: set[str] = set(DEFAULT_SKY_PROCESS_NAMES)
 ALLOW_TITLE_FALLBACK: bool = False
 PLAYBACK_DEBUG: bool = False
 REJECTED_WINDOW_WARNINGS: set[int] = set()

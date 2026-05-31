@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Literal
-from sky_music.domain.scheduler_types import FrameTimingPolicy, KeyAction, TimingPolicy
+from sky_music.domain.scheduler_types import FrameTimingPolicy, KeyAction
 
 class SongParseError(Exception):
     """Raised when the file format is corrupt, unparseable, or invalid JSON."""
@@ -42,16 +42,19 @@ def validate_song_structure(song_dict: dict, filepath_str: str) -> None:
 
 def validate_key_actions(
     actions: tuple[KeyAction, ...],
-    policy: TimingPolicy | FrameTimingPolicy | None = None
+    policy: FrameTimingPolicy | None = None,
 ) -> tuple[ScheduleInvariantViolation, ...]:
     """
     Validates a sequence of KeyAction events to ensure correct input state transitions.
     Returns a tuple of ScheduleInvariantViolation objects describing any anomalies found.
     """
     if policy is None:
-        policy = TimingPolicy()
-    if not isinstance(policy, FrameTimingPolicy):
-        policy = FrameTimingPolicy.from_timing_policy(policy)
+        policy = FrameTimingPolicy.balanced()
+    elif not isinstance(policy, FrameTimingPolicy):
+        raise TypeError(
+            "validate_key_actions requires FrameTimingPolicy; "
+            "pass the same policy used to build the schedule."
+        )
 
     violations = []
     active_keys = set()

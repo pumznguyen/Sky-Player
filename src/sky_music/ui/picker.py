@@ -30,6 +30,7 @@ from sky_music.ui.picker_layout import (
     format_actions,
     _format_duration,
     build_box,
+    build_header_box,
     format_song_row,
     format_info_str,
 )
@@ -40,6 +41,7 @@ from sky_music.ui.picker_metadata import (
     clear_metadata_cache,
     _get_song_recommendation,
 )
+from sky_music.domain.session_context import PlaybackSessionContext
 
 ACTIVE_THEME: str = load_saved_theme()
 
@@ -88,6 +90,8 @@ class SongPickerResult:
     profile_name: str
     tempo_scale: float
     fps: int | None = None
+    verbose_hud: bool | None = None
+    telemetry_enabled: bool | None = None
 
 PROFILES_INFO = [
     ("local-precise", "Best local timing, less safe for remote listeners"),
@@ -112,12 +116,22 @@ FPS_OPTIONS = [
     (144, "144 FPS (High Refresh)"),
 ]
 
+def safe_exit(app: Any, result: SongPickerResult | None) -> None:
+    future = getattr(app, "future", None)
+    if future is not None and future.done():
+        return
+    try:
+        app.exit(result=result)
+    except Exception:
+        pass
+
 def choose_song_interactively(
     theme_name: str | None = None,
     initial_profile: str = "balanced",
     initial_tempo: float = 1.0,
     initial_fps: int | None = None,
     initial_dry_run: bool = False,
+    scan_code_mode: str = "physical",
 ) -> SongPickerResult | None:
     if not HAS_PROMPT_TOOLKIT:
         return None
@@ -126,8 +140,10 @@ def choose_song_interactively(
     if not song_choices:
         return None
 
+    from sky_music.config import load_config, save_config, canonical_profile_name
+
     state = PickerState(song_choices=song_choices)
-    state.current_profile = initial_profile if any(p[0] == initial_profile for p in PROFILES_INFO) else "balanced"
+    state.current_profile = canonical_profile_name(initial_profile)
     state.current_tempo = initial_tempo
     state.current_fps = initial_fps
     state.dry_run_mode = initial_dry_run
@@ -135,10 +151,28 @@ def choose_song_interactively(
     state.temp_tempo = state.current_tempo
     state.temp_fps = state.current_fps
 
-    from sky_music.config import load_config, save_config
     user_cfg = load_config()
     verbose_hud_mode = user_cfg.verbose_hud
     telemetry_mode = user_cfg.telemetry_enabled_by_default
+
+    def picker_session() -> PlaybackSessionContext:
+        return PlaybackSessionContext(
+            profile_name=state.current_profile,
+            tempo_scale=state.current_tempo,
+            fps=state.current_fps,
+            scan_code_mode=scan_code_mode,
+        )
+
+    def build_picker_result() -> SongPickerResult:
+        return SongPickerResult(
+            state.filtered_songs[state.selected_index],
+            "dry_run" if state.dry_run_mode else "play",
+            state.current_profile,
+            state.current_tempo,
+            state.current_fps,
+            verbose_hud=verbose_hud_mode,
+            telemetry_enabled=telemetry_mode,
+        )
 
     active_theme_name, theme = get_theme(theme_name or ACTIVE_THEME)
     current_theme_name = active_theme_name
@@ -147,6 +181,7 @@ def choose_song_interactively(
     pointer = theme["pointer"]
     song_icon = theme["song_icon"]
     empty_icon = theme["empty_icon"]
+    theme_names = list(THEME_PRESETS.keys())
 
     song_indices = {path: idx for idx, path in enumerate(song_choices, start=1)}
 
@@ -180,7 +215,7 @@ def choose_song_interactively(
             available = max(0, term_height - overhead)
             has_warnings = False
             if state.filtered_songs:
-                metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index])
+                metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index], picker_session())
                 if metadata.risk != "low":
                     has_warnings = True
             if not has_warnings:
@@ -206,7 +241,7 @@ def choose_song_interactively(
     header_window = Window(content=header_control, height=3)
     results_window = Window(content=results_control, height=get_results_height, style="class:results")
     detail_window = Window(content=detail_control, height=get_detail_height, style="class:detail")
-    footer_window = Window(content=footer_control, height=5, style="class:footer")
+    footer_window = Window(content=footer_control, height=7, style="class:footer")
 
     layout = Layout(
         HSplit([
@@ -222,29 +257,23 @@ def choose_song_interactively(
 
     def build_header_text() -> list[tuple[str, str]]:
         terminal_width = max(60, min(80, shutil.get_terminal_size((80, 24)).columns))
-        title = " SKY MUSIC PLAYER "
-        
+
         mode_label = {
             "picker": "Picker", "preview": "Preview", "profile_select": "Profile Selection",
             "tempo_select": "Tempo Adjustment", "fps_select": "FPS Selection", "help": "Help Guide"
         }.get(state.current_view, "Picker")
-            
+
         dry_str = "ON" if state.dry_run_mode else "OFF"
+        hud_str = "ON" if verbose_hud_mode else "OFF"
         fps_str = str(state.current_fps) if state.current_fps else "Auto"
         telem_str = "ON" if telemetry_mode else "OFF"
-        
+
         parts = [
             mode_label, f"profile: {state.current_profile}", f"tempo: {state.current_tempo:.2f}x",
-            f"fps: {fps_str}", f"dry: {dry_str}", f"telem: {telem_str}",
-            f"theme: {current_theme_name}", f"songs: {len(state.song_choices)}"
+            f"fps: {fps_str}", f"dry: {dry_str}", f"hud: {hud_str}", f"telem: {telem_str}",
+            f"theme: {current_theme_name}", f"songs: {len(state.song_choices)}",
         ]
-        
-        info_str = format_info_str(parts, terminal_width - 4)
-        title_bar = f"╭─ {title} " + "─" * (terminal_width - len(title) - 6) + "╮\n"
-        info_line = f"│ {info_str:<{terminal_width - 4}} │\n"
-        bottom_bar = "╰" + "─" * (terminal_width - 2) + "╯\n"
-        
-        return [("class:title", title_bar), ("class:subtitle", info_line), ("class:divider", bottom_bar)]
+        return build_header_box("SKY MUSIC PLAYER", parts, terminal_width)
 
     def build_results_text() -> list[tuple[str, str]]:
         terminal_width = max(60, min(80, shutil.get_terminal_size((80, 24)).columns))
@@ -266,13 +295,13 @@ def choose_song_interactively(
             for idx in range(start_idx, end_idx):
                 path = state.filtered_songs[idx]
                 orig_idx = song_indices[path]
-                metadata = get_cached_song_ui_metadata(path)
+                metadata = get_cached_song_ui_metadata(path, picker_session())
                 lines.extend(format_song_row(orig_idx, metadata, idx == state.selected_index, search_field.text.strip(), pointer, song_icon))
             return lines
             
         elif state.current_view == "preview":
             if not state.filtered_songs: return []
-            metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index])
+            metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index], picker_session())
             
             preview_content = [
                 f"{metadata.name}",
@@ -281,10 +310,8 @@ def choose_song_interactively(
                 f"Min repeat gap: {metadata.min_same_key_gap_ms:.0f}ms │ Peak density: {metadata.peak_notes_per_second_1s:.1f} n/s",
             ]
             
-            profile_key = state.current_profile.lower().replace("-", "_")
-            from sky_music.config import DEFAULT_TIMING_PROFILES
-            p_dict = user_cfg.timing_profiles.get(profile_key) or DEFAULT_TIMING_PROFILES.get(profile_key, DEFAULT_TIMING_PROFILES["balanced"])
-            lead_ms = p_dict.get("input_lead_us", 0) // 1000
+            effective = picker_session().resolve_effective_policy(user_cfg)
+            lead_ms = effective.input_lead_us // 1000
             
             timing_content = [
                 f"Current:   {state.current_profile} @ {state.current_tempo:.2f}x (lead: {lead_ms}ms)",
@@ -333,31 +360,62 @@ def choose_song_interactively(
         terminal_width = max(60, min(80, shutil.get_terminal_size((80, 24)).columns))
         _, d_height = get_layout_heights()
         if d_height == 0 or not state.filtered_songs: return []
-        metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index])
+        metadata = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index], picker_session())
         content = [metadata.name]
-        if d_height >= 5:
+        if d_height >= 6:
+            content.append(
+                f"Time {_format_duration(metadata.duration_seconds)} │ "
+                f"Notes {metadata.note_count} │ Risk {metadata.risk.upper()}"
+            )
             content.append(f"Poly: {metadata.max_polyphony} │ Gap: {metadata.min_same_key_gap_ms:.0f}ms")
-            content.append(f"Density: {metadata.average_notes_per_second:.1f}/s (peak {metadata.peak_notes_per_second_1s:.1f}/s)")
+            content.append(
+                f"Density: {metadata.average_notes_per_second:.1f}/s "
+                f"(peak {metadata.peak_notes_per_second_1s:.1f}/s)"
+            )
+        elif d_height >= 4:
+            content.append(
+                f"Time {_format_duration(metadata.duration_seconds)} │ Notes {metadata.note_count} │ "
+                f"Risk {metadata.risk.upper()}"
+            )
+            content.append(f"Poly: {metadata.max_polyphony} │ Density: {metadata.average_notes_per_second:.1f}/s")
         else:
-            content.append(f"Poly: {metadata.max_polyphony} │ Density: {metadata.average_notes_per_second:.1f}/s │ Risk: {metadata.risk}")
+            content.append(
+                f"Time {_format_duration(metadata.duration_seconds)} │ Notes {metadata.note_count} │ "
+                f"Risk {metadata.risk.upper()}"
+            )
         return build_box("Selected", content, width=terminal_width)
 
     def build_footer_text() -> list[tuple[str, str]]:
         terminal_width = max(60, min(80, shutil.get_terminal_size((80, 24)).columns))
         if state.current_view in {"picker", "preview"}:
             if not state.filtered_songs: return []
-            meta = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index])
+            meta = get_cached_song_ui_metadata(state.filtered_songs[state.selected_index], picker_session())
             risk_style = "fg:#f97316 bold" if meta.risk == "high" else ("fg:#fbbf24 bold" if meta.risk == "medium" else "fg:#10b981")
             line1 = [(risk_style, f"{meta.risk.upper()} risk: "), ("class:detail", f"Suggested {meta.recommended_profile} @ {meta.recommended_tempo_scale:.2f}x")]
             
             actions = [
-                ActionHint("Enter", "play", "play", "play"), ActionHint("V", "preview", "view", "view"),
-                ActionHint("P", "profile", "prof", "p"), ActionHint("T", "tempo", "tempo", "t"),
-                ActionHint("F", "fps", "fps", "f"), ActionHint("D", "dry", "dry", "d"),
-                ActionHint("H", "help", "help", "h"), ActionHint("Esc", "quit", "quit", "q")
+                ActionHint("Enter", "play", "play", "play"),
+                ActionHint("Space", "quick play", "quick", "sp"),
+                ActionHint("V", "preview", "view", "v"),
+                ActionHint("P", "profile", "prof", "p"),
+                ActionHint("T", "tempo", "tempo", "t"),
+                ActionHint("F", "fps", "fps", "f"),
+                ActionHint("D", "dry-run", "dry", "d"),
+                ActionHint("F2", "HUD", "hud", "h2"),
+                ActionHint("F3", "telemetry", "telem", "h3"),
+                ActionHint("^R", "reload songs", "reload", "rl"),
+                ActionHint("^T", "theme", "theme", "th"),
+                ActionHint("H", "help", "help", "h"),
+                ActionHint("Esc", "quit", "quit", "q"),
             ]
-            return build_box("Actions", [line1, format_actions(actions[:4], terminal_width - 4), format_actions(actions[4:], terminal_width - 4)], width=terminal_width)
-        return build_box("Navigation", [["class:footer", "Arrow keys to choose, Enter to apply, Esc to cancel"]], width=terminal_width)
+            row_w = terminal_width - 4
+            action_rows = [
+                format_actions(actions[0:4], row_w),
+                format_actions(actions[4:8], row_w),
+                format_actions(actions[8:], row_w),
+            ]
+            return build_box("Actions", [line1, *action_rows], width=terminal_width)
+        return build_box("Navigation", [[("class:footer", "Arrow keys to choose, Enter to apply, Esc to cancel")]], width=terminal_width)
 
     def update_ui():
         query = remove_accents(search_field.text).casefold().strip()
@@ -423,6 +481,68 @@ def choose_song_interactively(
     @kb.add("d")
     def _(event): state.dry_run_mode = not state.dry_run_mode; update_ui()
 
+    @kb.add("space")
+    def _(event):
+        if state.current_view in {"picker", "preview"} and state.filtered_songs:
+            safe_exit(event.app, build_picker_result())
+
+    @kb.add("c-r")
+    def _(event):
+        if state.current_view == "picker":
+            clear_metadata_cache()
+            state.song_choices = get_song_choices(force_refresh=True)
+            state.filtered_songs = list(state.song_choices)
+            state.selected_index = 0
+            update_ui()
+
+    @kb.add("f2")
+    def _(event):
+        nonlocal verbose_hud_mode
+        if state.current_view == "picker":
+            verbose_hud_mode = not verbose_hud_mode
+            user_cfg.verbose_hud = verbose_hud_mode
+            save_config(user_cfg)
+            update_ui()
+
+    @kb.add("f3")
+    def _(event):
+        nonlocal telemetry_mode
+        if state.current_view == "picker":
+            telemetry_mode = not telemetry_mode
+            user_cfg.telemetry_enabled_by_default = telemetry_mode
+            save_config(user_cfg)
+            update_ui()
+
+    @kb.add("c-t")
+    def _(event):
+        global ACTIVE_THEME
+        nonlocal active_theme_name, current_theme_name, style_dict, style, pointer, song_icon, empty_icon
+        if not theme_names:
+            return
+        try:
+            current_index = theme_names.index(current_theme_name)
+        except ValueError:
+            current_index = -1
+        next_theme = theme_names[(current_index + 1) % len(theme_names)]
+        ACTIVE_THEME = next_theme
+        save_theme(next_theme)
+        active_theme_name, next_theme_data = get_theme(next_theme)
+        current_theme_name = active_theme_name
+        style_dict = next_theme_data["style"]
+        style = Style.from_dict(style_dict)
+        pointer = next_theme_data["pointer"]
+        song_icon = next_theme_data["song_icon"]
+        empty_icon = next_theme_data["empty_icon"]
+        try:
+            event.app.style = style
+        except Exception:
+            pass
+        update_ui()
+
+    @kb.add("c-c")
+    def _(event):
+        safe_exit(event.app, None)
+
     @kb.add("h")
     def _(event):
         state.previous_view, state.current_view = state.current_view, "help" if state.current_view != "help" else state.previous_view
@@ -432,16 +552,44 @@ def choose_song_interactively(
     def _(event):
         if state.current_view in {"picker", "preview"}:
             if state.filtered_songs:
-                safe_exit(event.app, SongPickerResult(state.filtered_songs[state.selected_index], "dry_run" if state.dry_run_mode else "play", state.current_profile, state.current_tempo, state.current_fps))
-        elif state.current_view == "profile_select": state.current_profile, state.current_view = state.temp_profile, state.previous_view
-        elif state.current_view == "tempo_select": state.current_tempo, state.current_view = state.temp_tempo, state.previous_view
-        elif state.current_view == "fps_select": state.current_fps, state.current_view = state.temp_fps, state.previous_view
+                safe_exit(event.app, build_picker_result())
+        elif state.current_view == "profile_select":
+            state.current_profile, state.current_view = state.temp_profile, "picker"
+            try:
+                from sky_music.config import load_config, save_config
+                cfg = load_config()
+                cfg.default_timing_profile = canonical_profile_name(state.current_profile)
+                save_config(cfg)
+            except Exception:
+                pass
+        elif state.current_view == "tempo_select":
+            state.current_tempo, state.current_view = state.temp_tempo, "picker"
+            try:
+                from sky_music.config import load_config, save_config
+                cfg = load_config()
+                cfg.default_tempo_scale = state.current_tempo
+                save_config(cfg)
+            except Exception:
+                pass
+        elif state.current_view == "fps_select":
+            state.current_fps, state.current_view = state.temp_fps, "picker"
+            try:
+                from sky_music.config import load_config, save_config
+                cfg = load_config()
+                if state.current_fps is not None:
+                    cfg.game_fps = state.current_fps
+                save_config(cfg)
+            except Exception:
+                pass
         update_ui()
 
     @kb.add("escape")
     def _(event):
         if state.current_view == "picker": safe_exit(event.app, None)
         else: state.current_view = "picker"; update_ui()
+
+    for path in song_choices:
+        get_cached_song_ui_metadata(path, picker_session())
 
     update_ui()
     return Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()

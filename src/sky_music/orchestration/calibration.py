@@ -27,8 +27,12 @@ def calibrate_profile(inp: CalibrationInput) -> CalibrationRecommendation:
     """
     Analyzes high-precision telemetry loops and returns targeted calibration parameter proposals.
     """
+    from sky_music.config import load_config
+    from sky_music.domain.scheduler_types import FrameTimingPolicy, TimingPolicy
+
     fps = inp.fps if inp.fps > 0 else 60
     frame_us = round(1_000_000 / fps)
+    cfg = load_config()
     
     # 1. Input Lead calibration formula
     recommended_lead = inp.p95_lateness_us + inp.p95_send_duration_us + int(frame_us * 0.5)
@@ -67,12 +71,16 @@ def calibrate_profile(inp: CalibrationInput) -> CalibrationRecommendation:
         rec_profile = inp.profile_name
         rec_tempo = inp.tempo_scale
         reason = "Good timing performance. Current parameters are well-calibrated."
-        
-    # 3. Hold duration calculation
-    from sky_music.config import DEFAULT_TIMING_PROFILES
-    profile_key = rec_profile.lower().replace("-", "_")
-    base_hold = DEFAULT_TIMING_PROFILES.get(profile_key, DEFAULT_TIMING_PROFILES["balanced"]).get("hold_us", 24000)
-    recommended_hold = max(base_hold, int(frame_us * 1.25))
+
+    # 3. Hold duration via the same FrameTimingPolicy path as playback scheduling
+    base = TimingPolicy.from_profile_name(rec_profile, cfg)
+    effective = FrameTimingPolicy.from_timing_policy(
+        base,
+        fps=inp.fps if inp.fps > 0 else None,
+        **cfg.frame_timing.as_policy_kwargs(),
+    )
+    recommended_hold = effective.hold_us
+    recommended_lead = max(recommended_lead, effective.input_lead_us)
 
     return CalibrationRecommendation(
         profile_name=rec_profile,
@@ -81,4 +89,26 @@ def calibrate_profile(inp: CalibrationInput) -> CalibrationRecommendation:
         hold_us=recommended_hold,
         reason=reason,
         severity=severity
+    )
+
+
+def calibration_input_from_summary(summary: dict) -> CalibrationInput:
+    """Build CalibrationInput from a telemetry *.summary.json payload."""
+    lat = summary.get("lateness_us", {})
+    dur = summary.get("send_duration_us", {})
+    backend = summary.get("backend", {})
+    fps_val = int(summary.get("fps") or 60)
+    sched = summary.get("schedule", {})
+
+    return CalibrationInput(
+        profile_name=str(summary.get("profile", "balanced")),
+        tempo_scale=float(summary.get("tempo_scale", 1.0)),
+        fps=fps_val,
+        p95_lateness_us=int(lat.get("p95_us", 0)),
+        p99_lateness_us=int(lat.get("p99_us", 0)),
+        p95_send_duration_us=int(dur.get("p95_us", 0)),
+        late_over_10ms=int(lat.get("over_10ms", 0)),
+        impossible_same_key_repeats=int(sched.get("impossible_same_key_repeats", 0)),
+        risky_same_key_repeats=int(sched.get("risky_same_key_repeats", 0)),
+        failed_release_count=int(backend.get("panic_release_failures", 0)),
     )

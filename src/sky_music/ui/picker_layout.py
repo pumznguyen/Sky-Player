@@ -114,6 +114,22 @@ def format_song_row(idx: int, metadata: Any, selected: bool, query: str, pointer
     tokens.append((sel_class, f"   {metadata.recommended_profile.strip():<11}\n"))
     return tokens
 
+def build_header_box(title: str, info_parts: list[str], width: int) -> list[tuple[str, str]]:
+    """Header with a consistent border width (matches other picker boxes)."""
+    inner_w = max(20, width - 4)
+    info_str = format_info_str(info_parts, inner_w)
+    title_label = f" {title.strip()} "
+    top_fill = max(0, width - 2 - len(title_label))
+    top_line = f"╭{title_label}{'─' * top_fill}╮\n"
+    info_line = f"│ {info_str:<{inner_w}} │\n"
+    bottom_line = f"╰{'─' * (width - 2)}╯\n"
+    return [
+        ("class:title", top_line),
+        ("class:subtitle", info_line),
+        ("class:divider", bottom_line),
+    ]
+
+
 def format_info_str(parts: list[str], max_width: int) -> str:
     current_parts = list(parts)
     while current_parts:

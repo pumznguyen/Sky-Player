@@ -233,26 +233,8 @@ def inspect_telemetry_report(target_path: str, recommend: bool = False) -> None:
                 
             # Perform calibration recommendation if requested
             if recommend:
-                p95_lat = int(lat.get("p95_us", 0))
-                p99_lat = int(lat.get("p99_us", 0))
-                p95_snd = int(dur.get("p95_us", 0))
-                late_10 = int(lat.get("over_10ms", 0))
-                
-                fps_val = int(data.get("fps") or 60) # Default to 60 if None or 0
-                
-                from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
-                inp = CalibrationInput(
-                    profile_name=data.get("profile", "balanced"),
-                    tempo_scale=float(data.get("tempo_scale", 1.0)),
-                    fps=fps_val,
-                    p95_lateness_us=p95_lat,
-                    p99_lateness_us=p99_lat,
-                    p95_send_duration_us=p95_snd,
-                    late_over_10ms=late_10,
-                    impossible_same_key_repeats=0,
-                    risky_same_key_repeats=0,
-                    failed_release_count=int(backend.get("panic_release_failures", 0))
-                )
+                from sky_music.orchestration.calibration import calibrate_profile, calibration_input_from_summary
+                inp = calibration_input_from_summary(data)
                 rec = calibrate_profile(inp)
                 
                 print(f"\n  Calibration Recommendation:")

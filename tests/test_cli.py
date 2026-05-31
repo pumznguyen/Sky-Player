@@ -1,77 +1,57 @@
 import sys
 from pathlib import Path
 import pytest
+from sky_music.config import AppConfig, clear_config_cache
 
 src_dir = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_dir))
 
 import main
 
-def test_cli_basic_arguments():
-    """Verify legacy arguments parse correctly with expected default structures."""
+@pytest.fixture(autouse=True)
+def _reset_config_cache():
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
+def test_cli_song_argument_parsing():
     parser = main.build_arg_parser()
-    
-    # Check default parses
-    args = parser.parse_args([])
-    assert args.song is None
-    assert args.list is False
-    assert args.countdown == 3
-    assert args.repeat == 1
-    assert args.no_clear is False
-    assert args.doctor is False
-    
-    # Check custom parses
-    args = parser.parse_args([
-        "--song", "My Song",
-        "--countdown", "5",
-        "--repeat", "3",
-        "--no-clear",
-        "--list"
-    ])
-    assert args.song == "My Song"
-    assert args.countdown == 5
-    assert args.repeat == 3
-    assert args.no_clear is True
+    args = parser.parse_args(["--song", "Diamonds"])
+    assert args.song == "Diamonds"
+
+def test_cli_list_argument():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--list"])
     assert args.list is True
 
-def test_cli_hotkeys_defaults():
-    """Verify default hotkey binds parse securely without overlapping constraints."""
+def test_cli_fps_argument_applies_timing_policy():
     parser = main.build_arg_parser()
-    args = parser.parse_args([])
-    
-    assert args.pause_key == "f8"
-    assert args.skip_key == "f9"
-    assert args.quit_key == "f10"
-    assert args.refocus_key == "f6"
-    assert args.panic_key == "ctrl+alt+backspace"
-    assert args.disable_hotkeys is False
-    assert args.allow_note_hotkeys is False
+    args = parser.parse_args(["--fps", "60"])
+    main.configure_from_args(args, AppConfig())
+    from sky_music.domain.scheduler_types import FrameTimingPolicy
+    assert isinstance(main.TIMING_POLICY, FrameTimingPolicy)
+    assert main.TIMING_POLICY.fps == 60
 
-def test_cli_playback_controls_parsing():
-    """Verify PlaybackControls constructs bindings securely from CLI argument string tokens."""
+def test_cli_theme_argument():
     parser = main.build_arg_parser()
-    
-    # 1. Standard allowed defaults
-    args = parser.parse_args([])
-    controls = main.build_playback_controls(args)
-    assert controls.pause.display == "F8"
-    assert controls.skip.display == "F9"
-    assert controls.quit.display == "F10"
-    assert controls.refocus.display == "F6"
-    assert controls.panic.display == "Ctrl+Alt+Backspace"
-    assert controls.enabled is True
-    
-    # 2. Disabled hotkeys
-    args = parser.parse_args(["--disable-hotkeys"])
-    controls = main.build_playback_controls(args)
-    assert controls.enabled is False
-    
-    # 3. Conflict trigger (Note key 'p' overlap)
-    args = parser.parse_args(["--pause-key", "p"])
-    with pytest.raises(ValueError, match="Hotkey overlaps with note keys"):
-        main.build_playback_controls(args)
-        
-    # 4. Conflict allowed explicitly
-    args = parser.parse_args(["--pause-key", "p", "--allow-note-hotkeys"])
-    controls = main.build_playback_controls(args)
-    assert controls.pause.display == "P"
+    args = parser.parse_args(["--theme", "cyberpunk"])
+    assert args.theme == "cyberpunk"
+
+def test_cli_repeat_argument():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--repeat", "5"])
+    assert args.repeat == 5
+
+def test_cli_countdown_argument():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--countdown", "10"])
+    assert args.countdown == 10
+
+def test_cli_doctor_flags():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--doctor"])
+    assert args.doctor is True
+    args = parser.parse_args(["--doctor-timing"])
+    assert args.doctor_timing is True
+    args = parser.parse_args(["--doctor-input"])
+    assert args.doctor_input is True

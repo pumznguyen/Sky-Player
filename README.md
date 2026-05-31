@@ -98,8 +98,8 @@ python src/main.py --doctor-input
 ### 🏎️ Timing Profiles & Overrides
 Adjust note holds and safety gaps by selecting predefined profiles or overriding constants:
 ```bash
-# Predefined Profiles: fast (16ms hold), balanced (24ms hold), conservative (34ms hold)
-python src/main.py --song "Song Name" --timing-profile fast
+# Predefined Profiles: balanced (default), local-precise, remote-safe, dense-safe
+python src/main.py --song "Song Name" --timing-profile remote-safe
 
 # Manual overrides (in milliseconds)
 python src/main.py --song "Song Name" --hold-ms 20 --min-hold-ms 10 --release-gap-ms 4
@@ -138,7 +138,7 @@ python src/main.py [OPTIONS]
   --doctor-timing            Diagnose high-precision multimedia timers status
   --doctor-input             Diagnose layout configurations & depressed key conflicts
   
-  --timing-profile PROFILE   Select timing profile: fast, balanced, conservative
+  --timing-profile PROFILE   Select timing profile: balanced, local-precise, remote-safe, dense-safe
   --hold-ms HOLD             Override key hold duration (in milliseconds)
   --min-hold-ms MIN          Override minimum key hold duration (in milliseconds)
   --release-gap-ms GAP       Override release gap (in milliseconds)

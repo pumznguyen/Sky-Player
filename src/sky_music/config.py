@@ -2,41 +2,13 @@
 
 The config file is read once at startup and provides *defaults* that can be
 overridden by CLI flags.  Saving happens when the user explicitly changes a
-value (e.g. switching theme with Ctrl+T).
-
-Schema (all fields are optional; missing keys fall back to the defaults
-defined in ``AppDefaults``):
-
-.. code-block:: json
-
-    {
-        "schema_version": 2,
-        "theme": "aurora",
-        "default_timing_profile": "balanced",
-        "default_tempo_scale": 1.0,
-        "game_fps": 60,
-        "telemetry_enabled_by_default": false,
-        "verbose_hud": false,
-        "hotkeys": {
-            "pause":   "f8",
-            "skip":    "f9",
-            "quit":    "f10",
-            "refocus": "f6",
-            "panic":   "ctrl+alt+backspace"
-        },
-        "safety": {
-            "prompt_on_medium_risk": true,
-            "prompt_on_high_risk":   true
-        }
-    }
+setting in the UI.
 """
-
-from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 CONFIG_PATH: Path = Path("config.json")
 SCHEMA_VERSION: int = 2
@@ -55,6 +27,57 @@ class HotkeyDefaults:
 class SafetyDefaults:
     prompt_on_medium_risk: bool = True
     prompt_on_high_risk:   bool = True
+
+
+FrameAlignMode = Literal["none", "down_only"]
+
+
+def normalize_frame_align(value: str | None) -> FrameAlignMode:
+    if value == "down_only":
+        return "down_only"
+    return "none"
+
+
+@dataclass
+class FrameTimingDefaults:
+    """Frame-aware scaling ratios (defaults match built-in FrameTimingPolicy formulas)."""
+
+    min_visible_hold_frames: float = 1.25
+    chord_merge_max_frame_ratio: float = 0.25
+    input_lead_min_frame_ratio: float = 0.5
+    release_gap_min_frame_ratio: float = 0.15
+    repeat_release_gap_min_frame_ratio: float = 0.10
+    min_hold_min_frame_ratio: float = 0.5
+    frame_align: FrameAlignMode = "none"
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "FrameTimingDefaults":
+        def ratio(key: str, default: float) -> float:
+            val = raw.get(key, default)
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return default
+
+        return cls(
+            min_visible_hold_frames=ratio("min_visible_hold_frames", 1.25),
+            chord_merge_max_frame_ratio=ratio("chord_merge_max_frame_ratio", 0.25),
+            input_lead_min_frame_ratio=ratio("input_lead_min_frame_ratio", 0.5),
+            release_gap_min_frame_ratio=ratio("release_gap_min_frame_ratio", 0.15),
+            repeat_release_gap_min_frame_ratio=ratio("repeat_release_gap_min_frame_ratio", 0.10),
+            min_hold_min_frame_ratio=ratio("min_hold_min_frame_ratio", 0.5),
+            frame_align=normalize_frame_align(str(raw.get("frame_align", "none"))),
+        )
+
+    def as_policy_kwargs(self) -> dict[str, float]:
+        return {
+            "min_visible_hold_frames": self.min_visible_hold_frames,
+            "chord_merge_max_frame_ratio": self.chord_merge_max_frame_ratio,
+            "input_lead_min_frame_ratio": self.input_lead_min_frame_ratio,
+            "release_gap_min_frame_ratio": self.release_gap_min_frame_ratio,
+            "repeat_release_gap_min_frame_ratio": self.repeat_release_gap_min_frame_ratio,
+            "min_hold_min_frame_ratio": self.min_hold_min_frame_ratio,
+        }
 
 
 DEFAULT_TIMING_PROFILES: dict[str, dict[str, Any]] = {
@@ -86,7 +109,7 @@ DEFAULT_TIMING_PROFILES: dict[str, dict[str, Any]] = {
         "release_gap_us": 10000,
         "repeat_release_gap_us": 8000,
         "min_scheduled_hold_us": 500,
-        "input_lead_us": 12000,
+        "input_lead_us": 10000,
         "chord_merge_window_us": 4000,
         "spin_threshold_us": 200,
         "focus_restore_grace_us": 150000
@@ -105,6 +128,9 @@ DEFAULT_TIMING_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
+DEFAULT_SKY_PROCESS_NAMES: list[str] = ["Sky.exe", "Sky Children of the Light.exe"]
+
+
 @dataclass
 class AppConfig:
     """Typed representation of config.json values.
@@ -121,11 +147,113 @@ class AppConfig:
     verbose_hud:                 bool          = False
     hotkeys:                     HotkeyDefaults = field(default_factory=HotkeyDefaults)
     safety:                      SafetyDefaults  = field(default_factory=SafetyDefaults)
+    frame_timing:                FrameTimingDefaults = field(default_factory=FrameTimingDefaults)
     timing_profiles:             dict[str, dict[str, Any]] = field(default_factory=dict)
     songs_dir:                   str           = "songs"
-    sky_process_names:           list[str]     = field(default_factory=lambda: ["Sky.exe", "Sky Children of the Light.exe"])
+    sky_process_names:           list[str]     = field(default_factory=lambda: list(DEFAULT_SKY_PROCESS_NAMES))
     allow_title_fallback:        bool          = False
 
+
+_runtime_cfg: AppConfig | None = None
+
+
+def clear_config_cache() -> None:
+    """Reset the in-memory config cache (primarily for tests)."""
+    global _runtime_cfg
+    _runtime_cfg = None
+
+
+def normalize_profile_name(name: str) -> str:
+    return name.lower().replace("-", "_")
+
+
+CLI_PROFILE_NAMES: tuple[str, ...] = (
+    "balanced",
+    "local-precise",
+    "remote-safe",
+    "dense-safe",
+)
+
+_PROFILE_KEY_TO_CLI: dict[str, str] = {
+    "balanced": "balanced",
+    "local_precise": "local-precise",
+    "remote_safe": "remote-safe",
+    "dense_safe": "dense-safe",
+}
+
+_LEGACY_PROFILE_KEYS: dict[str, str] = {
+    "balanced_120fps": "balanced",
+    "low_fps_30": "balanced",
+    "fast": "balanced",
+    "conservative": "balanced",
+}
+
+
+def canonical_profile_name(name: str) -> str:
+    """Normalize a profile name to picker/CLI form (hyphens, no @fps suffix)."""
+    base = name.split("@", 1)[0].strip()
+    key = normalize_profile_name(base)
+    if key in _PROFILE_KEY_TO_CLI:
+        return _PROFILE_KEY_TO_CLI[key]
+    if key in _LEGACY_PROFILE_KEYS:
+        return _LEGACY_PROFILE_KEYS[key]
+    return "balanced"
+
+
+def display_profile_name(base: str, fps: int | None = None) -> str:
+    """HUD-friendly profile label; FPS suffix is display-only, never persisted."""
+    canonical = canonical_profile_name(base)
+    if fps is not None and fps > 0:
+        return f"{canonical}@{fps}fps"
+    return canonical
+
+
+def merged_timing_profiles(cfg: AppConfig) -> dict[str, dict[str, Any]]:
+    """Built-in profiles with user overrides from config.json."""
+    return {**DEFAULT_TIMING_PROFILES, **cfg.timing_profiles}
+
+
+def profile_dict_for(cfg: AppConfig, profile_name: str) -> dict[str, Any]:
+    """Resolve a timing profile dict by name, falling back to balanced."""
+    key = normalize_profile_name(canonical_profile_name(profile_name))
+    merged = merged_timing_profiles(cfg)
+    return merged.get(key, merged["balanced"])
+
+
+def spin_threshold_for_profile(cfg: AppConfig, profile_name: str) -> int:
+    p_dict = profile_dict_for(cfg, profile_name)
+    return int(
+        p_dict.get(
+            "spin_threshold_us",
+            DEFAULT_TIMING_PROFILES["balanced"]["spin_threshold_us"],
+        )
+    )
+
+
+def sky_process_names_csv(cfg: AppConfig | None = None) -> str:
+    names = (cfg or AppConfig()).sky_process_names
+    return ",".join(names)
+
+
+def argparse_base_defaults() -> dict[str, Any]:
+    """Generic CLI defaults before ``apply_config_defaults`` applies config.json."""
+    hk = HotkeyDefaults()
+    return {
+        "timing_profile": "balanced",
+        "tempo_scale": 1.0,
+        "debug_csv": False,
+        "verbose_hud": False,
+        "theme": None,
+        "songs_dir": Path(AppConfig.songs_dir),
+        "fps": None,
+        "allow_title_fallback": False,
+        "pause_key": hk.pause,
+        "skip_key": hk.skip,
+        "quit_key": hk.quit,
+        "refocus_key": hk.refocus,
+        "panic_key": hk.panic,
+        "sky_process_names": sky_process_names_csv(),
+    }
 
 
 def _load_raw() -> dict[str, Any]:
@@ -142,44 +270,44 @@ def _load_raw() -> dict[str, Any]:
         return {}
 
 
-def load_config() -> AppConfig:
-    """Load config.json and return a typed ``AppConfig`` with all defaults applied."""
+def _build_config_from_disk() -> AppConfig:
     raw = _load_raw()
     hk_raw = raw.get("hotkeys", {}) if isinstance(raw.get("hotkeys"), dict) else {}
     sf_raw = raw.get("safety", {})   if isinstance(raw.get("safety"),  dict) else {}
+    ft_raw = raw.get("frame_timing", {}) if isinstance(raw.get("frame_timing"), dict) else {}
 
     hotkeys = HotkeyDefaults(
-        pause   = hk_raw.get("pause",   HotkeyDefaults.pause),
-        skip    = hk_raw.get("skip",    HotkeyDefaults.skip),
-        quit    = hk_raw.get("quit",    HotkeyDefaults.quit),
-        refocus = hk_raw.get("refocus", HotkeyDefaults.refocus),
-        panic   = hk_raw.get("panic",   HotkeyDefaults.panic),
+        pause   = str(hk_raw.get("pause",   HotkeyDefaults.pause)),
+        skip    = str(hk_raw.get("skip",    HotkeyDefaults.skip)),
+        quit    = str(hk_raw.get("quit",    HotkeyDefaults.quit)),
+        refocus = str(hk_raw.get("refocus", HotkeyDefaults.refocus)),
+        panic   = str(hk_raw.get("panic",   HotkeyDefaults.panic)),
     )
+
     safety = SafetyDefaults(
         prompt_on_medium_risk = bool(sf_raw.get("prompt_on_medium_risk", SafetyDefaults.prompt_on_medium_risk)),
         prompt_on_high_risk   = bool(sf_raw.get("prompt_on_high_risk",   SafetyDefaults.prompt_on_high_risk)),
     )
 
-    timing_profiles_raw = raw.get("timing_profiles")
-    timing_profiles = {k: dict(v) for k, v in DEFAULT_TIMING_PROFILES.items()}
+    frame_timing = FrameTimingDefaults.from_dict(ft_raw)
+
+    # Validate timing_profiles structure
+    timing_profiles_raw = raw.get("timing_profiles", {})
+    timing_profiles = {}
     if isinstance(timing_profiles_raw, dict):
         for name, profile_dict in timing_profiles_raw.items():
             if isinstance(profile_dict, dict):
-                clean_name = name.lower().replace("-", "_")
-                if clean_name not in timing_profiles:
-                    timing_profiles[clean_name] = {}
-                for k, v in profile_dict.items():
-                    timing_profiles[clean_name][k] = v
+                timing_profiles[name] = profile_dict
 
     spn_raw = raw.get("sky_process_names")
     if isinstance(spn_raw, list):
         sky_process_names = [str(item) for item in spn_raw]
     else:
-        sky_process_names = ["Sky.exe", "Sky Children of the Light.exe"]
+        sky_process_names = list(DEFAULT_SKY_PROCESS_NAMES)
 
-    default_timing_profile = str(raw.get("default_timing_profile", AppConfig.default_timing_profile))
-    if default_timing_profile in ("balanced_120fps", "low_fps_30", "fast", "conservative"):
-        default_timing_profile = "balanced"
+    default_timing_profile = canonical_profile_name(
+        str(raw.get("default_timing_profile", AppConfig.default_timing_profile))
+    )
 
     return AppConfig(
         theme                        = str(raw.get("theme", AppConfig.theme)),
@@ -190,23 +318,38 @@ def load_config() -> AppConfig:
         verbose_hud                  = bool(raw.get("verbose_hud", AppConfig.verbose_hud)),
         hotkeys                      = hotkeys,
         safety                       = safety,
+        frame_timing                 = frame_timing,
         timing_profiles              = timing_profiles,
-        songs_dir                    = str(raw.get("songs_dir", "songs")),
+        songs_dir                    = str(raw.get("songs_dir", AppConfig.songs_dir)),
         sky_process_names            = sky_process_names,
-        allow_title_fallback         = bool(raw.get("allow_title_fallback", False))
+        allow_title_fallback         = bool(raw.get("allow_title_fallback", AppConfig.allow_title_fallback)),
     )
+
+
+def load_config(*, force_reload: bool = False) -> AppConfig:
+    """Load config.json and return a typed ``AppConfig`` with all defaults applied.
+
+    The result is cached in memory after the first load; call ``save_config`` to
+    update the cache, or ``force_reload=True`` to re-read from disk.
+    """
+    global _runtime_cfg
+    if not force_reload and _runtime_cfg is not None:
+        return _runtime_cfg
+    _runtime_cfg = _build_config_from_disk()
+    return _runtime_cfg
 
 
 def save_config(cfg: AppConfig) -> None:
     """Persist ``cfg`` to config.json, preserving any unknown keys."""
     raw = _load_raw()
-    raw["schema_version"]              = SCHEMA_VERSION
-    raw["theme"]                       = cfg.theme
-    raw["default_timing_profile"]      = cfg.default_timing_profile
-    raw["default_tempo_scale"]         = cfg.default_tempo_scale
-    raw["game_fps"]                    = cfg.game_fps
+    
+    # Update known keys
+    raw["theme"]                        = cfg.theme
+    raw["default_timing_profile"]       = canonical_profile_name(cfg.default_timing_profile)
+    raw["default_tempo_scale"]          = cfg.default_tempo_scale
+    raw["game_fps"]                     = cfg.game_fps
     raw["telemetry_enabled_by_default"] = cfg.telemetry_enabled_by_default
-    raw["verbose_hud"]                 = cfg.verbose_hud
+    raw["verbose_hud"]                  = cfg.verbose_hud
     raw["hotkeys"] = {
         "pause":   cfg.hotkeys.pause,
         "skip":    cfg.hotkeys.skip,
@@ -218,88 +361,79 @@ def save_config(cfg: AppConfig) -> None:
         "prompt_on_medium_risk": cfg.safety.prompt_on_medium_risk,
         "prompt_on_high_risk":   cfg.safety.prompt_on_high_risk,
     }
-    raw["timing_profiles"] = cfg.timing_profiles
-    raw["songs_dir"] = cfg.songs_dir
-    raw["sky_process_names"] = cfg.sky_process_names
-    raw["allow_title_fallback"] = cfg.allow_title_fallback
+    raw["frame_timing"] = {
+        "min_visible_hold_frames": cfg.frame_timing.min_visible_hold_frames,
+        "chord_merge_max_frame_ratio": cfg.frame_timing.chord_merge_max_frame_ratio,
+        "input_lead_min_frame_ratio": cfg.frame_timing.input_lead_min_frame_ratio,
+        "release_gap_min_frame_ratio": cfg.frame_timing.release_gap_min_frame_ratio,
+        "repeat_release_gap_min_frame_ratio": cfg.frame_timing.repeat_release_gap_min_frame_ratio,
+        "min_hold_min_frame_ratio": cfg.frame_timing.min_hold_min_frame_ratio,
+        "frame_align": cfg.frame_timing.frame_align,
+    }
+    raw["timing_profiles"]              = cfg.timing_profiles
+    raw["songs_dir"]                    = cfg.songs_dir
+    raw["sky_process_names"]            = cfg.sky_process_names
+    raw["allow_title_fallback"]         = cfg.allow_title_fallback
+    raw["schema_version"]               = SCHEMA_VERSION
+
+    global _runtime_cfg
     try:
         with CONFIG_PATH.open("w", encoding="utf-8") as f:
             json.dump(raw, f, indent=4)
-    except Exception:
-        pass
+        _runtime_cfg = cfg
+    except Exception as e:
+        print(f"Failed to save config: {e}")
 
 
-def apply_config_defaults(args, cfg: AppConfig) -> None:
-    """Apply saved config values as defaults for any CLI arg the user did NOT override.
-
+def apply_config_defaults(args: Any, cfg: AppConfig) -> None:
+    """Update argparse Namespace with configured defaults for unset flags.
+    
     This is called *before* ``configure_from_args()`` so that explicit CLI
     flags always win.  Only fields with argparse defaults (i.e. the user did
     not supply them explicitly) are updated.
     """
-    import argparse  # local import to keep module importable without argparse
 
-    # We need to know which args were explicitly passed vs. came from defaults.
-    # argparse doesn't expose this directly, so we compare against known defaults.
-    parser_defaults = {
-        "timing_profile": "balanced",
-        "tempo_scale":    1.0,
-        "fps":            60,
-        "debug_csv":      False,
-        "verbose_hud":    False,
-        "pause_key":      "f8",
-        "skip_key":       "f9",
-        "quit_key":       "f10",
-        "refocus_key":    "f6",
-        "panic_key":      "ctrl+alt+backspace",
-        "theme":          None,
-        "songs_dir":      Path("songs"),
-        "sky_process_names": "Sky.exe,Sky Children of the Light.exe",
-        "allow_title_fallback": False,
-    }
+    # argparse doesn't expose which flags were explicit; compare to generic CLI defaults.
+    parser_defaults = argparse_base_defaults()
 
-    # timing profile
     if getattr(args, "timing_profile", None) == parser_defaults["timing_profile"]:
-        args.timing_profile = cfg.default_timing_profile
+        args.timing_profile = canonical_profile_name(cfg.default_timing_profile)
 
-    # tempo scale
     if getattr(args, "tempo_scale", None) == parser_defaults["tempo_scale"]:
         args.tempo_scale = cfg.default_tempo_scale
 
-    # game fps
-    if getattr(args, "fps", None) == parser_defaults["fps"]:
-        args.fps = cfg.game_fps
-
-    # telemetry CSV
-    if not getattr(args, "debug_csv", True):
+    if getattr(args, "debug_csv", None) == parser_defaults["debug_csv"]:
         args.debug_csv = cfg.telemetry_enabled_by_default
 
-    # verbose HUD
-    if not getattr(args, "verbose_hud", True):
+    if getattr(args, "verbose_hud", None) == parser_defaults["verbose_hud"]:
         args.verbose_hud = cfg.verbose_hud
 
-    # hotkeys (only replace if user left default value)
-    for attr, saved, default in [
-        ("pause_key",   cfg.hotkeys.pause,   parser_defaults["pause_key"]),
-        ("skip_key",    cfg.hotkeys.skip,    parser_defaults["skip_key"]),
-        ("quit_key",    cfg.hotkeys.quit,    parser_defaults["quit_key"]),
-        ("refocus_key", cfg.hotkeys.refocus, parser_defaults["refocus_key"]),
-        ("panic_key",   cfg.hotkeys.panic,   parser_defaults["panic_key"]),
-    ]:
-        if getattr(args, attr, None) == default:
-            setattr(args, attr, saved)
-
-    # theme: if not passed on CLI, use saved theme
-    if getattr(args, "theme", None) is None:
+    if getattr(args, "theme", None) == parser_defaults["theme"]:
         args.theme = cfg.theme
 
-    # songs_dir: if not overridden, use configured path
     if getattr(args, "songs_dir", None) == parser_defaults["songs_dir"]:
         args.songs_dir = Path(cfg.songs_dir)
 
-    # sky_process_names: if not overridden, use configured list
-    if getattr(args, "sky_process_names", None) == parser_defaults["sky_process_names"]:
-        args.sky_process_names = ",".join(cfg.sky_process_names)
-
-    # allow_title_fallback: if not overridden, use configured value
     if getattr(args, "allow_title_fallback", None) == parser_defaults["allow_title_fallback"]:
         args.allow_title_fallback = cfg.allow_title_fallback
+
+    if getattr(args, "fps", None) == parser_defaults["fps"]:
+        args.fps = cfg.game_fps
+
+    if getattr(args, "pause_key", None) == parser_defaults["pause_key"]:
+        args.pause_key = cfg.hotkeys.pause
+
+    if getattr(args, "skip_key", None) == parser_defaults["skip_key"]:
+        args.skip_key = cfg.hotkeys.skip
+
+    if getattr(args, "quit_key", None) == parser_defaults["quit_key"]:
+        args.quit_key = cfg.hotkeys.quit
+
+    if getattr(args, "refocus_key", None) == parser_defaults["refocus_key"]:
+        args.refocus_key = cfg.hotkeys.refocus
+
+    if getattr(args, "panic_key", None) == parser_defaults["panic_key"]:
+        args.panic_key = cfg.hotkeys.panic
+
+    if getattr(args, "sky_process_names", None) == parser_defaults["sky_process_names"]:
+        args.sky_process_names = sky_process_names_csv(cfg)

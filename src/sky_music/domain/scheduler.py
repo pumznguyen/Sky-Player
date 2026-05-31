@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from sky_music.domain.domain import Song, InstrumentProfile, NoteKey
 from sky_music.layouts import NoteResolver, DefaultNoteResolver
-from sky_music.domain.scheduler_types import TimingPolicy, KeyAction, ScheduleResult, Microseconds, FrameTimingPolicy, ScheduleDiagnostic
-import math
+from sky_music.domain.scheduler_types import KeyAction, ScheduleMetadata, Microseconds, FrameTimingPolicy, ScheduleDiagnostic, align_frame_down_us
 
 class ScheduleBuildError(ValueError):
     """Raised when the schedule cannot be built due to strict conflict policies."""
@@ -10,6 +9,20 @@ class ScheduleBuildError(ValueError):
         super().__init__(message)
         self.recommended_tempo_scale = recommended_tempo_scale
         self.recommended_profile = recommended_profile
+
+
+def _recommended_tempo_scale_for_repeats(
+    shortest_interval_us: int | None,
+    policy: FrameTimingPolicy,
+    tempo_scale: float,
+) -> float | None:
+    if shortest_interval_us is None or shortest_interval_us <= 0:
+        return None
+    min_cycle_us = policy.min_hold_us + policy.repeat_release_gap_us
+    if shortest_interval_us >= min_cycle_us:
+        return None
+    suggested = tempo_scale * shortest_interval_us / min_cycle_us
+    return max(0.1, min(1.0, round(suggested, 2)))
 
 @dataclass(frozen=True, slots=True)
 class ScheduledNoteDraft:
@@ -23,25 +36,29 @@ class ScheduledNoteDraft:
 def build_key_actions(
     song: Song,
     profile: InstrumentProfile | None = None,
-    policy: TimingPolicy | FrameTimingPolicy = TimingPolicy(),
+    policy: FrameTimingPolicy | None = None,
     scan_code_mode: str = "physical",
     resolver: NoteResolver | None = None,
     tempo_scale: float = 1.0
-) -> ScheduleResult:
+) -> ScheduleMetadata:
     """
     Builds a microsecond-accurate event timeline from a domain Song.
-    Returns a ScheduleResult containing:
+    Returns a ScheduleMetadata containing:
       - actions: tuple of sorted KeyAction objects
-      - compressed_holds: count of note holds compressed due to dense scheduling
-      - impossible_same_key_repeats: count of repeats scheduled too fast to meet min-hold
-      - max_polyphony: maximum number of notes pressed simultaneously
-      - note_count: total number of notes scheduled
+
+    Caller must pass a resolved FrameTimingPolicy (e.g. via PlaybackSessionContext.resolve_effective_policy).
     """
     if tempo_scale <= 0:
         raise ValueError("tempo_scale must be > 0")
 
-    if not isinstance(policy, FrameTimingPolicy):
-        policy = FrameTimingPolicy.from_timing_policy(policy)
+    if policy is None:
+        policy = FrameTimingPolicy.balanced()
+    elif not isinstance(policy, FrameTimingPolicy):
+        raise TypeError(
+            "build_key_actions requires FrameTimingPolicy; "
+            "resolve via FrameTimingPolicy.from_timing_policy() or "
+            "PlaybackSessionContext.resolve_effective_policy() before calling."
+        )
 
     if profile is None:
         from sky_music.layouts import SKY_15_KEY_PROFILE
@@ -87,8 +104,6 @@ def build_key_actions(
     drafts.sort(key=lambda d: d.source_time_us)
 
     # 2. Merge chords using tolerance window (chord_merge_window_us) based on physical scan_codes
-    # Group notes of different keys within tolerance to snap to the same timestamp.
-    # Same physical keys are NOT merged (they require separate cycles).
     merged_drafts = []
     current_groups = [] # list of tuples: (group_time_us, set_of_scan_codes_in_group)
     
@@ -141,112 +156,77 @@ def build_key_actions(
         next_same_info = next_same_key_time[draft.source_index]
         sc = draft.scan_code
         shifted_us = draft.shifted_time_us
+        if policy.frame_align == "down_only" and policy.frame_us > 0:
+            shifted_us = align_frame_down_us(shifted_us, policy.frame_us, policy.frame_align)
         orig_us = draft.source_time_us
         
         effective_delta_us = None
         max_hold = None
         risk = "ok"
         
-        # Calculate maximum possible hold duration for this key
         if next_same_info is not None:
-            next_shifted, next_orig = next_same_info
-            effective_delta_us = next_shifted - shifted_us
+            next_shifted_us, next_orig_us = next_same_info
+            effective_delta_us = next_shifted_us - shifted_us
             
-            # Analyze interval delta from unshifted (original) timeline for report accuracy
-            delta = next_orig - orig_us
-            if shortest_same_key_interval_us is None or delta < shortest_same_key_interval_us:
-                shortest_same_key_interval_us = delta
-                
+            if shortest_same_key_interval_us is None or effective_delta_us < shortest_same_key_interval_us:
+                shortest_same_key_interval_us = effective_delta_us
+            
+            # Constraint: Must release phím TRƯỚC KHI bấm lại phím đó lần sau ít nhất policy.repeat_release_gap_us
             max_hold = effective_delta_us - policy.repeat_release_gap_us
-            required_interval_us = policy.hold_us + policy.repeat_release_gap_us
             
-            # Strict/Adaptive same-key repeat policy check
-            if effective_delta_us < required_interval_us:
-                if policy.same_key_conflict_policy in ("strict", "adaptive"):
-                    rec_tempo = round(tempo_scale * (delta / required_interval_us), 2)
-                    if rec_tempo > 0.95:
-                        rec_tempo = 0.92
-                    if rec_tempo < 0.5:
-                        rec_tempo = 0.5
-                    
-                    policy_str = policy.same_key_conflict_policy.capitalize()
-                    
-                    if effective_delta_us < policy.min_scheduled_hold_us + policy.repeat_release_gap_us:
-                        msg = (
-                            f"{policy_str} Policy Violation: Impossible same-key repeat detected. "
-                            f"Effective delta between repeats is {effective_delta_us}us, which is below the minimum "
-                            f"physical requirement of {policy.min_scheduled_hold_us + policy.repeat_release_gap_us}us."
-                        )
-                    else:
-                        msg = (
-                            f"{policy_str} Policy Violation: Impossible same-key repeat detected. "
-                            f"Effective delta between repeats is {effective_delta_us}us, which is below the required "
-                            f"interval of {required_interval_us}us (hold={policy.hold_us}us + gap={policy.repeat_release_gap_us}us)."
-                        )
-                        
+            if max_hold < policy.min_hold_us:
+                impossible_same_key_repeats += 1
+                risk = "severe"
+                diagnostics.append(ScheduleDiagnostic(
+                    source_index=draft.source_index,
+                    note_key=draft.note_key,
+                    scan_code=draft.scan_code,
+                    code="impossible_repeat",
+                    message=f"Repeat too fast: {effective_delta_us/1000:.1f}ms interval < { (policy.min_hold_us + policy.repeat_release_gap_us)/1000:.1f}ms minimum cycle"
+                ))
+                if policy.same_key_conflict_policy == "strict":
                     raise ScheduleBuildError(
-                        msg,
-                        recommended_tempo_scale=rec_tempo,
-                        recommended_profile="dense-safe"
+                        f"Cannot build schedule under strict policy: same-key repeat interval "
+                        f"{effective_delta_us / 1000:.1f}ms is below minimum cycle "
+                        f"{(policy.min_hold_us + policy.repeat_release_gap_us) / 1000:.1f}ms.",
+                        recommended_tempo_scale=_recommended_tempo_scale_for_repeats(
+                            effective_delta_us, policy, tempo_scale
+                        ),
+                        recommended_profile="dense-safe",
                     )
-            
-            # Classify same-key repeat severity based on effective_delta_us for degraded mode
-            if effective_delta_us < policy.min_scheduled_hold_us + policy.repeat_release_gap_us:
-                risk = "impossible_repeat"
-                if effective_delta_us <= 0:
-                    impossible_same_key_repeats += 1
-                    compressed_holds += 1
-                    hold = 0
-                    reason_up = "repeat_release"
-                else:
-                    impossible_same_key_repeats += 1
-                    compressed_holds += 1
-                    hold = min(policy.min_scheduled_hold_us, effective_delta_us)
-                    reason_up = "repeat_release"
-            elif effective_delta_us < policy.min_hold_us + policy.repeat_release_gap_us:
-                risk = "risky_repeat"
-                risky_same_key_repeats += 1
-                compressed_holds += 1
-                hold = max(policy.min_scheduled_hold_us, max_hold)
-                reason_up = "repeat_release"
             elif max_hold < policy.hold_us:
-                risk = "compressed"
+                risky_same_key_repeats += 1
+                risk = "moderate"
+                
+        # Determine actual hold duration
+        if max_hold is not None:
+            actual_hold = max(policy.min_hold_us, min(policy.hold_us, max_hold))
+            if actual_hold < policy.hold_us:
                 compressed_holds += 1
-                hold = max(policy.min_scheduled_hold_us, max_hold)
-                reason_up = "repeat_release"
-            else:
-                hold = policy.hold_us
-                reason_up = "release"
         else:
-            hold = policy.hold_us
-            reason_up = "final_release"
+            actual_hold = policy.hold_us
             
-        down_us = shifted_us
-        up_us = shifted_us + hold
+        up_at_us = shifted_us + actual_hold
         
-        diagnostics.append(ScheduleDiagnostic(
-            source_index=draft.source_index,
-            note_key=draft.note_key,
-            scan_code=sc,
-            source_time_us=Microseconds(orig_us),
-            scheduled_down_us=Microseconds(down_us),
-            scheduled_up_us=Microseconds(up_us),
-            hold_us=Microseconds(hold),
-            reason=reason_up,
-            risk=risk
-        ))
-        
-        raw_events.append({"at_us": down_us, "sc": sc, "kind": "down", "reason": "note"})
-        raw_events.append({"at_us": up_us, "sc": sc, "kind": "up", "reason": reason_up})
-        
-    # 5.5 Delay normal releases that coincide with note down onsets to safety gap
-    down_timestamps = {ev["at_us"] for ev in raw_events if ev["kind"] == "down"}
+        # Add events
+        raw_events.append({"at_us": shifted_us, "sc": sc, "kind": "down", "reason": "onset"})
+        raw_events.append({"at_us": up_at_us, "sc": sc, "kind": "up", "reason": "repeat_release" if next_same_info else "release"})
+
+    # 5.5 Release collision delay: when a standard release coincides with another key's down,
+    # defer release so the new down is not swallowed by release ordering.
+    downs_at_us: dict[int, set[int]] = {}
     for ev in raw_events:
-        if ev["kind"] == "up" and ev["reason"] in ("release", "final_release"):
-            if ev["at_us"] in down_timestamps:
-                ev["at_us"] += policy.release_gap_us
+        if ev["kind"] == "down":
+            downs_at_us.setdefault(ev["at_us"], set()).add(ev["sc"])
+
+    for ev in raw_events:
+        if ev["kind"] != "up" or ev["reason"] == "repeat_release":
+            continue
+        conflicting = downs_at_us.get(ev["at_us"], set()) - {ev["sc"]}
+        if conflicting:
+            ev["at_us"] += policy.release_gap_us
         
-    # 6. Group (coalesce) events at the exact same timestamp + kind
+    # 6. Group simultaneous events into single KeyAction objects
     grouped = {} # key: (at_us, kind, reason) -> list of scan codes
     for ev in raw_events:
         g_key = (ev["at_us"], ev["kind"], ev["reason"])
@@ -254,12 +234,11 @@ def build_key_actions(
             grouped[g_key] = []
         grouped[g_key].append(ev["sc"])
         
-    # Build a raw list of grouped KeyActions
     key_actions_list = []
     for (at_us, kind, reason), scs in grouped.items():
         unique_scs = tuple(dict.fromkeys(scs))
         key_actions_list.append(KeyAction(
-            at_us=at_us,
+            at_us=Microseconds(at_us),
             scan_codes=unique_scs,
             kind=kind,
             reason=reason
@@ -279,7 +258,7 @@ def build_key_actions(
             
     key_actions_list.sort(key=lambda a: (a.at_us, action_priority(a)))
     
-    # 8. Calculate max polyphony (simultaneous active down keys)
+    # 8. Calculate max polyphony
     active_keys = set()
     max_polyphony = 0
     for action in key_actions_list:
@@ -287,7 +266,8 @@ def build_key_actions(
             active_keys.update(action.scan_codes)
             max_polyphony = max(max_polyphony, len(active_keys))
         else:
-            active_keys.difference_update(action.scan_codes)
+            for sc in action.scan_codes:
+                active_keys.discard(sc)
             
     warnings = []
     if impossible_same_key_repeats > 0:
@@ -301,7 +281,7 @@ def build_key_actions(
     playback_duration_us = duration_us
     source_duration_us = Microseconds(max((d.source_time_us for d in merged_drafts), default=0) + policy.hold_us)
 
-    return ScheduleResult(
+    return ScheduleMetadata(
         actions=tuple(key_actions_list),
         compressed_holds=compressed_holds,
         impossible_same_key_repeats=impossible_same_key_repeats,
@@ -317,4 +297,3 @@ def build_key_actions(
         frame_us=policy.frame_us,
         fps=policy.fps
     )
-

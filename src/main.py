@@ -2,10 +2,27 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from dataclasses import dataclass
 
 # Import từ các mô-đun chuyên biệt
 from sky_music.platform.win32 import inputs
-from sky_music.config import load_config, apply_config_defaults
+from sky_music.config import (
+    load_config,
+    apply_config_defaults,
+    save_config,
+    HotkeyDefaults,
+    AppConfig,
+    merged_timing_profiles,
+    spin_threshold_for_profile,
+    sky_process_names_csv,
+    canonical_profile_name,
+    display_profile_name,
+)
+from sky_music.domain.session_context import (
+    PlaybackSessionContext,
+    merge_session_with_overrides,
+    apply_recommendation_to_context,
+)
 from sky_music.platform.win32.inputs import (
     enable_high_precision_timers,
     disable_high_precision_timers
@@ -36,6 +53,7 @@ DEBUG_START_PERF = None
 DEBUG_LOG_BUFFER = []
 TIMING_POLICY = None
 SLEEP_POLICY = None
+PLAYBACK_SESSION: PlaybackSessionContext | None = None
 TELEMETRY_CSV_ENABLED = False
 DRY_RUN_MODE = False
 TEMPO_SCALE = 1.0
@@ -126,6 +144,13 @@ def _handle_risk_analysis(report, song, is_dry_run: bool, controls, policy_overr
 
     if choice == "1":
         print(f"  → Switched to profile: {recommended}")
+        # Cross-session persistence for risk-based profile change
+        try:
+            user_cfg = load_config()
+            user_cfg.default_timing_profile = canonical_profile_name(recommended)
+            save_config(user_cfg)
+        except Exception:
+            pass
         return True, recommended, None
     elif choice == "2":
         print( "  → Tempo scaled to 0.92x")
@@ -275,7 +300,7 @@ def _mini_preflight(is_dry_run: bool, profile: str = "balanced", tempo: float = 
 
     # 4. Key conflicts
     keys = doctor.check_physical_keys_held()
-    checks.append((keys["ok"], "No note keys held" if keys["ok"] else f"Keys held: {', '.join(keys.get('held_keys', []))}"))
+    checks.append((keys["ok"], "No note keys held" if keys["ok"] else f"Held: {', '.join(keys.get('held_keys', []))}"))
 
     # Render gorgeous preflight panels!
     dry_str = "ON" if is_dry_run else "OFF"
@@ -306,11 +331,11 @@ def _mini_preflight(is_dry_run: bool, profile: str = "balanced", tempo: float = 
     status_line1 = f"{ANSI_GREEN}Readiness checks passed. Starting playback...{ANSI_RESET}"
     if controls is not None and controls.enabled:
         ctrls_str = (
+            f"{ANSI_BOLD}{controls.panic.display}{ANSI_RESET} panic │ "
             f"{ANSI_BOLD}{controls.pause.display}{ANSI_RESET} pause/resume │ "
             f"{ANSI_BOLD}{controls.skip.display}{ANSI_RESET} skip │ "
             f"{ANSI_BOLD}{controls.quit.display}{ANSI_RESET} quit │ "
-            f"{ANSI_BOLD}{controls.refocus.display}{ANSI_RESET} refocus │ "
-            f"{ANSI_BOLD}{controls.panic.display}{ANSI_RESET} panic"
+            f"{ANSI_BOLD}{controls.refocus.display}{ANSI_RESET} refocus"
         )
         status_lines = [status_line1, ctrls_str]
     else:
@@ -326,62 +351,164 @@ def _mini_preflight(is_dry_run: bool, profile: str = "balanced", tempo: float = 
     return True
 
 
-def _print_post_run_report(engine, profile_name: str, tempo_scale: float) -> None:
-    """Print a readable post-run timing/backend summary from the engine's telemetry."""
-    summary = engine.telemetry.get_summary()
-    if not summary:
+def _print_profile_comparison_table(cfg: AppConfig | None = None) -> None:
+    """Print a rich ANSI side-by-side timing comparison table for all profiles."""
+    ANSI_RESET  = "\033[0m"
+    ANSI_BOLD   = "\033[1m"
+    ANSI_CYAN   = "\033[36m"
+    ANSI_YELLOW = "\033[33m"
+    ANSI_DIM    = "\033[2m"
+
+    cfg = cfg or load_config()
+    profiles = merged_timing_profiles(cfg)
+
+    COLS = [
+        ("Profile",              lambda n, d: n),
+        ("hold_ms",              lambda n, d: f"{d.get('hold_us', 0) // 1000}"),
+        ("min_hold_ms",          lambda n, d: f"{d.get('min_hold_us', 0) // 1000}"),
+        ("release_gap_ms",       lambda n, d: f"{d.get('release_gap_us', 0) // 1000}"),
+        ("repeat_gap_ms",        lambda n, d: f"{d.get('repeat_release_gap_us', 0) // 1000}"),
+        ("input_lead_ms",        lambda n, d: f"{d.get('input_lead_us', 0) // 1000}"),
+        ("chord_merge_ms",       lambda n, d: f"{d.get('chord_merge_window_us', 0) // 1000}"),
+        ("grace_ms",             lambda n, d: f"{d.get('focus_restore_grace_us', 0) // 1000}"),
+        ("conflict_policy",      lambda n, d: d.get("same_key_conflict_policy", "degraded")),
+    ]
+
+    rows: list[list[str]] = []
+    for name, data in sorted(profiles.items()):
+        rows.append([fmt(name, data) for _, fmt in COLS])
+
+    col_widths = [max(len(header), max(len(r[i]) for r in rows)) for i, (header, _) in enumerate(COLS)]
+
+    def _fmt_row(cells: list[str], header: bool = False) -> str:
+        parts = []
+        for i, cell in enumerate(cells):
+            padded = cell.ljust(col_widths[i])
+            if header:
+                parts.append(f"{ANSI_BOLD}{ANSI_CYAN}{padded}{ANSI_RESET}")
+            elif i == 0:
+                parts.append(f"{ANSI_YELLOW}{padded}{ANSI_RESET}")
+            else:
+                parts.append(padded)
+        return "  │  ".join(parts)
+
+    sep = "  ┼──".join("─" * w for w in col_widths)
+
+    print()
+    print(f"  {ANSI_BOLD}{ANSI_CYAN}Timing Profile Comparison{ANSI_RESET}")
+    print(f"  {'─' * (sum(col_widths) + 5 * (len(COLS) - 1))}")
+    print(f"  {_fmt_row([h for h, _ in COLS], header=True)}")
+    print(f"  {sep}")
+    for row in rows:
+        print(f"  {_fmt_row(row)}")
+    print()
+    print(f"  {ANSI_DIM}All time values in milliseconds. Use --timing-profile <name> to select.{ANSI_RESET}")
+    print()
+
+
+def _load_latest_telemetry_summary() -> dict | None:
+    import json
+    from pathlib import Path
+
+    logs_dir = Path("logs")
+    summaries = sorted(logs_dir.glob("*.summary.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not summaries:
+        return None
+    try:
+        with summaries[0].open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _apply_calibration_from_telemetry(cfg: AppConfig) -> bool:
+    """Apply the latest telemetry calibration recommendation to the in-memory session."""
+    global PLAYBACK_SESSION, TIMING_POLICY, SLEEP_POLICY, TIMING_PROFILE_NAME, TEMPO_SCALE
+
+    ANSI_RESET  = "\033[0m"
+    ANSI_BOLD   = "\033[1m"
+    ANSI_CYAN   = "\033[36m"
+    ANSI_YELLOW = "\033[33m"
+    ANSI_GREEN  = "\033[32m"
+    ANSI_DIM    = "\033[2m"
+    if summary is None:
+        print(f"\n  {ANSI_YELLOW}No telemetry summary files found in logs/.{ANSI_RESET}")
+        print("  Run a playback with --debug-csv first to generate telemetry.")
+        print()
+        return False
+
+    from sky_music.orchestration.calibration import calibrate_profile, calibration_input_from_summary
+
+    inp = calibration_input_from_summary(summary)
+    rec = calibrate_profile(inp)
+    base = PLAYBACK_SESSION or PlaybackSessionContext.balanced(
+        tempo_scale=cfg.default_tempo_scale,
+        fps=cfg.game_fps if cfg.game_fps > 0 else None,
+    )
+    updated = apply_recommendation_to_context(base, rec)
+    PLAYBACK_SESSION = updated
+    TIMING_POLICY = updated.resolve_effective_policy(cfg)
+    SLEEP_POLICY = updated.resolve_sleep_policy(cfg)
+    TIMING_PROFILE_NAME = updated.display_profile_label()
+    TEMPO_SCALE = updated.tempo_scale
+
+    print()
+    print(f"  {ANSI_BOLD}{ANSI_CYAN}Applied calibration to session{ANSI_RESET}")
+    print(f"    Profile     : {rec.profile_name}")
+    print(f"    Tempo scale : {rec.tempo_scale:.2f}x")
+    print(f"    Input lead  : {rec.input_lead_us / 1000:.1f} ms")
+    print(f"    Hold target : {rec.hold_us / 1000:.1f} ms ({ANSI_DIM}via FrameTimingPolicy{ANSI_RESET})")
+    print(f"    Severity    : {rec.severity.upper()}")
+    print(f"    Reason      : {rec.reason}")
+    print(f"  {ANSI_GREEN}In-memory only — config.json not modified.{ANSI_RESET}")
+    print()
+    return True
+
+
+def _run_auto_calibrate() -> None:
+    """Read the most recent telemetry summary and print calibration recommendations."""
+    import glob, json
+    from pathlib import Path
+
+    ANSI_RESET  = "\033[0m"
+    ANSI_BOLD   = "\033[1m"
+    ANSI_CYAN   = "\033[36m"
+    ANSI_YELLOW = "\033[33m"
+    ANSI_GREEN  = "\033[32m"
+
+    logs_dir = Path("logs")
+    summaries = sorted(logs_dir.glob("*.summary.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not summaries:
+        print(f"\n  {ANSI_YELLOW}No telemetry summary files found in logs/.{ANSI_RESET}")
+        print(  "  Run a playback with --debug-csv first to generate telemetry.")
+        print()
         return
 
-    lat = summary.get("lateness_us", {})
-    snd = summary.get("send_duration_us", {})
-    hld = summary.get("note_hold_duration_us", {})
-    bk = summary.get("backend", {})
-    total = summary.get("total_events", 0)
+    latest = summaries[0]
+    try:
+        with latest.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+    except Exception as e:
+        print(f"\n  Failed to read {latest}: {e}")
+        return
 
     print()
-    print("  ┌─ Post-run Report " + "─" * 41)
-    print(f"  │  Profile: {profile_name}  |  Tempo: {tempo_scale:.2f}x  |  Events: {total}")
-    print(f"  │  Lateness     p50={lat.get('p50_us',0):.0f}µs  p95={lat.get('p95_us',0):.0f}µs  p99={lat.get('p99_us',0):.0f}µs  max={lat.get('max_us',0):.0f}µs")
-    print(f"  │  Late >2ms={lat.get('over_2ms',0)}  >5ms={lat.get('over_5ms',0)}  >10ms={lat.get('over_10ms',0)}")
-    print(f"  │  Send dur    p95={snd.get('p95_us',0):.0f}µs  |  Hold avg={hld.get('avg_us',0)/1000:.1f}ms")
-    failures = bk.get("panic_release_failures", 0)
-    stuck = bk.get("failed_release_keys_final", [])
-    if failures or stuck:
-        print(f"  │  Backend: ⚠ {failures} panic failure(s), stuck keys: {stuck}")
-    else:
-        print( "  │  Backend: healthy (✓ no stuck keys)")
-
-    # Advanced Calibration Recommendations based on Telemetry Feedback Loop
-    p99 = lat.get("p99_us", 0)
-    p95_send = snd.get("p95_us", 0)
-    over_10ms = lat.get("over_10ms", 0)
-    
-    if failures or stuck:
-        print( "  │  ⚠ Recommendation: Stuck keys detected — run --doctor before next playback.")
-    else:
-        # Check high keyboard injection latency (UIPI / OS throttling)
-        if p95_send > 1500:
-            print(f"  │  ⚠ Warning: High input injection delay (p95_send={p95_send/1000:.1f}ms).")
-            print( "  │  Recommend: Run Sky Player as Administrator or close background overlays.")
-            
-        # Timing recommendations based on latency percentiles
-        if over_10ms > 5 or p99 > 15000:
-            print(f"  │  Recommendation: Severe latency jitter detected (p99={p99/1000:.1f}ms).")
-            print( "  │  Try: --timing-profile low_fps_30 or remote_safe, check CPU load.")
-        elif over_10ms > 0 or p99 > 8000:
-            print(f"  │  Recommendation: Moderate latency (p99={p99/1000:.1f}ms).")
-            print( "  │  Try: --timing-profile balanced_60fps, or reduce --tempo-scale slightly.")
-        elif p99 < 3000:
-            print(f"  │  Timing quality: excellent ✓ (p99={p99/1000:.1f}ms)")
-            print( "  │  Try: --timing-profile balanced_120fps or local_precise for higher timing accuracy.")
-        else:
-            print( "  │  Timing quality: good ✓")
-            
-    print(  "  └" + "─" * 57)
+    print(f"  {ANSI_BOLD}{ANSI_CYAN}Auto-Calibrate — analysing: {latest.name}{ANSI_RESET}")
     print()
 
+    try:
+        from sky_music.orchestration.telemetry import inspect_telemetry_report
+        inspect_telemetry_report(str(latest), recommend=True)
+    except Exception as e:
+        # Fallback: print raw summary fields if calibration module fails
+        lat = summary.get("lateness_us", {})
+        print(f"  p99 lateness : {lat.get('p99_us', 0) / 1000:.1f} ms")
+        print(f"  late >10 ms  : {lat.get('over_10ms', 0)}")
+        print(f"  Profile used : {summary.get('profile', 'unknown')}")
+        print(f"  [calibration engine error: {e}]")
+    print()
+    print()
 
-from dataclasses import dataclass
 
 @dataclass
 class PlaybackOverrides:
@@ -397,7 +524,7 @@ def play_selected_song(
     overrides: PlaybackOverrides | None = None,
 ) -> str:
     from sky_music.domain.parser import parse_song_file
-    from sky_music.domain.scheduler import build_key_actions
+    from sky_music.domain.scheduler import build_key_actions, ScheduleBuildError
     from sky_music.infrastructure.backend import WinSendInputBackend, DryRunBackend
     from sky_music.orchestration.engine import PlaybackEngine
     from sky_music.ui.hud import ProgressRenderer
@@ -408,45 +535,33 @@ def play_selected_song(
         print(f"Failed to parse song: {exc}")
         return PLAYBACK_QUIT
 
-    # Extract overrides
+    # Extract overrides into a unified session context
     force_dry_run = overrides.dry_run if overrides else False
     force_profile = overrides.profile if overrides else None
-    force_tempo   = overrides.tempo   if overrides else None
-    force_fps     = overrides.fps     if overrides else None
+    force_tempo = overrides.tempo if overrides else None
+    force_fps = overrides.fps if overrides else None
+    if force_profile is not None:
+        force_profile = canonical_profile_name(force_profile)
+
+    base_session = PLAYBACK_SESSION or PlaybackSessionContext.balanced(
+        tempo_scale=TEMPO_SCALE,
+        fps=None,
+        scan_code_mode=CURRENT_SCAN_CODE_MODE,
+    )
+    session = merge_session_with_overrides(
+        base_session,
+        profile=force_profile,
+        tempo=force_tempo,
+        fps=force_fps,
+    )
 
     is_dry_run = DRY_RUN_MODE or force_dry_run
-    # Picker decision overrides global config (advisory-only flow)
-    current_profile = force_profile if force_profile is not None else TIMING_PROFILE_NAME
-    current_tempo   = force_tempo   if force_tempo   is not None else TEMPO_SCALE
+    current_profile = session.display_profile_label()
+    current_tempo = session.tempo_scale
 
-    # Build scheduled actions using specified TimingPolicy and selected mode
-    from sky_music.domain.scheduler_types import TimingPolicy
-    from sky_music.infrastructure.timing import SleepPolicy
-    active_policy = TIMING_POLICY
-    active_sleep_policy = SLEEP_POLICY
-    
-    if force_profile is not None:
-        active_policy = TimingPolicy.from_profile_name(force_profile)
-        # Look up spin_threshold_us for the forced profile
-        profile_key = force_profile.lower().replace("-", "_")
-        user_cfg = load_config()
-        if profile_key in user_cfg.timing_profiles:
-            spin_us = user_cfg.timing_profiles[profile_key].get("spin_threshold_us", 500)
-        else:
-            from sky_music.config import DEFAULT_TIMING_PROFILES
-            spin_us = DEFAULT_TIMING_PROFILES.get(profile_key, {}).get("spin_threshold_us", 500)
-        active_sleep_policy = SleepPolicy(
-            spin_threshold_us=spin_us,
-            poll_s=0.025
-        )
-
-    if force_fps is not None and force_fps > 0:
-        from sky_music.domain.scheduler_types import FrameTimingPolicy
-        active_policy = FrameTimingPolicy.from_timing_policy(
-            active_policy,
-            fps=force_fps,
-            same_key_conflict_policy=active_policy.same_key_conflict_policy
-        )
+    user_cfg = load_config()
+    active_policy = session.resolve_effective_policy(user_cfg)
+    active_sleep_policy = session.resolve_sleep_policy(user_cfg)
 
     import sys
     resolver = None
@@ -467,15 +582,31 @@ def play_selected_song(
             return False
         return True
 
-    sched_meta = build_key_actions(
-        song, policy=active_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
-        resolver=resolver, tempo_scale=current_tempo
-    )
+    def build_schedule(session_ctx, policy, tempo):
+        try:
+            return build_key_actions(
+                song,
+                policy=policy,
+                scan_code_mode=session_ctx.scan_code_mode,
+                resolver=resolver,
+                tempo_scale=tempo,
+            )
+        except ScheduleBuildError as exc:
+            print(f"\n[FATAL] Schedule build failed: {exc}")
+            if exc.recommended_tempo_scale is not None:
+                print(f"  Try a slower tempo: --tempo-scale {exc.recommended_tempo_scale:.2f}")
+            if exc.recommended_profile:
+                print(f"  Or switch to a safer profile: --timing-profile {exc.recommended_profile}")
+            return None
+
+    sched_meta = build_schedule(session, active_policy, current_tempo)
+    if sched_meta is None:
+        return PLAYBACK_QUIT
     actions = sched_meta.actions
 
     # Run Schedule Invariant Validator
     from sky_music.domain.validation import validate_key_actions
-    violations = validate_key_actions(actions)
+    violations = validate_key_actions(actions, policy=active_policy)
     if violations:
         print("\n[Warning] Schedule Invariant Violations detected:")
         for violation in violations:
@@ -489,7 +620,6 @@ def play_selected_song(
 
     # If picker already decided (force_profile/tempo supplied), skip the prompt
     if report.severity != "low" and force_profile is None and force_tempo is None:
-        user_cfg = load_config()
         should_prompt = True
         if report.severity == "medium" and not user_cfg.safety.prompt_on_medium_risk:
             should_prompt = False
@@ -510,32 +640,18 @@ def play_selected_song(
             print("Proceeding automatically as configured by safety rules.\n")
             should_continue = True
             new_profile, new_tempo = None, None
-        if new_profile is not None and new_profile != current_profile:
-            # Rebuild schedule with the switched profile
-            new_policy = TimingPolicy.from_profile_name(new_profile)
-            active_policy = new_policy
-            
-            # Switch SleepPolicy corresponding to the dynamically chosen profile
-            profile_key = new_profile.lower().replace("-", "_")
-            user_cfg = load_config()
-            if profile_key in user_cfg.timing_profiles:
-                new_spin = user_cfg.timing_profiles[profile_key].get("spin_threshold_us", 500)
-            else:
-                from sky_music.config import DEFAULT_TIMING_PROFILES
-                new_spin = DEFAULT_TIMING_PROFILES.get(profile_key, {}).get("spin_threshold_us", 500)
-            active_sleep_policy = SleepPolicy(
-                spin_threshold_us=new_spin,
-                poll_s=0.025
-            )
-            
-            sched_meta = build_key_actions(
-                song, policy=new_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
-                resolver=resolver, tempo_scale=current_tempo
-            )
+        if new_profile is not None and canonical_profile_name(new_profile) != session.profile_name:
+            session = session.with_profile(new_profile)
+            active_policy = session.resolve_effective_policy(user_cfg)
+            active_sleep_policy = session.resolve_sleep_policy(user_cfg)
+            current_profile = session.display_profile_label()
+
+            sched_meta = build_schedule(session, active_policy, current_tempo)
+            if sched_meta is None:
+                return PLAYBACK_QUIT
             actions = sched_meta.actions
-            current_profile = new_profile
-            
-            violations = validate_key_actions(actions)
+
+            violations = validate_key_actions(actions, policy=active_policy)
             if violations:
                 print("\n[Warning] Schedule Invariant Violations detected after profile change:")
                 for violation in violations:
@@ -544,14 +660,15 @@ def play_selected_song(
                     return PLAYBACK_QUIT
                     
         if new_tempo is not None:
-            sched_meta = build_key_actions(
-                song, policy=active_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
-                resolver=resolver, tempo_scale=new_tempo
-            )
+            session = session.with_tempo(new_tempo)
+            current_tempo = session.tempo_scale
+            active_policy = session.resolve_effective_policy(user_cfg)
+            sched_meta = build_schedule(session, active_policy, current_tempo)
+            if sched_meta is None:
+                return PLAYBACK_QUIT
             actions = sched_meta.actions
-            current_tempo = new_tempo
-            
-            violations = validate_key_actions(actions)
+
+            violations = validate_key_actions(actions, policy=active_policy)
             if violations:
                 print("\n[Warning] Schedule Invariant Violations detected after tempo change:")
                 for violation in violations:
@@ -569,35 +686,44 @@ def play_selected_song(
     else:
         print(f"[simulation] DRY-RUN enabled. Simulating playback of {song.name}...")
 
+    user_cfg = load_config()
+    verbose_hud_mode = user_cfg.verbose_hud
+    telemetry_enabled = TELEMETRY_CSV_ENABLED or user_cfg.telemetry_enabled_by_default or PLAYBACK_DEBUG or force_dry_run
+
     backend = DryRunBackend() if is_dry_run else WinSendInputBackend()
     renderer = ProgressRenderer(
         controls,
-        verbose=VERBOSE_HUD,
+        verbose=verbose_hud_mode,
         profile_name=current_profile,
         tempo_scale=current_tempo,
     )
-    
+
+    # Clear preflight/countdown output so the live HUD starts on a clean terminal.
+    # ProgressRenderer only erases its own previously-rendered lines; static print()
+    # output from _mini_preflight would otherwise remain visible above the HUD.
+    clear_terminal()
+
     engine = PlaybackEngine(
         song=song,
         actions=actions,
         backend=backend,
         controls=controls,
         renderer=renderer,
-        telemetry_enabled=TELEMETRY_CSV_ENABLED or PLAYBACK_DEBUG or force_dry_run,
+        telemetry_enabled=telemetry_enabled,
         require_focus=not is_dry_run,
         profile_name=current_profile,
         tempo_scale=current_tempo,
-        fps=force_fps,
         sleep_policy=active_sleep_policy,
-        focus_restore_grace_us=active_policy.focus_restore_grace_us
+        focus_restore_grace_us=active_policy.focus_restore_grace_us,
+        fps=getattr(active_policy, "fps", None)
     )
     result = engine.play()
-    # P3: post-run summary
-    _print_post_run_report(engine, current_profile, current_tempo)
+    clear_terminal()
     return result
 
 
-def build_arg_parser():
+def build_arg_parser() -> argparse.ArgumentParser:
+    hk = HotkeyDefaults()
     parser = argparse.ArgumentParser(
         description="Play Sky song files from the terminal.",
     )
@@ -635,7 +761,7 @@ def build_arg_parser():
     timing.add_argument(
         "--timing-profile",
         choices=[
-            "local-precise", "balanced", "remote-safe", "dense-safe"
+            "balanced", "local-precise", "remote-safe", "dense-safe"
         ],
         default="balanced",
         help=(
@@ -651,12 +777,6 @@ def build_arg_parser():
         type=float,
         default=1.0,
         help="Scale playback tempo: 1.2 = 20%% faster, 0.8 = 20%% slower (default: 1.0)",
-    )
-    timing.add_argument(
-        "--fps",
-        type=int,
-        default=60,
-        help="Target FPS for frame-aware timing scaling (default: 60)",
     )
     timing.add_argument(
         "--hold-ms",
@@ -714,32 +834,51 @@ def build_arg_parser():
         choices=["degraded", "strict"],
         help="degraded = warn and compress timing (default), strict = reject and abort playback",
     )
+    timing.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        metavar="FPS",
+        help=(
+            "Game frame rate hint for frame-aware timing (e.g. 30, 60, 120). "
+            "Scales hold, input lead, release gap, and chord merge via FrameTimingPolicy."
+        ),
+    )
+    timing.add_argument(
+        "--frame-align",
+        choices=["none", "down_only"],
+        default=None,
+        help=(
+            "Optional snap of key-down events to frame boundaries (requires --fps). "
+            "Default: frame_timing.frame_align from config.json."
+        ),
+    )
 
     # ── Runtime Controls ──────────────────────────────────────────────────────
     ctrl = parser.add_argument_group("Runtime controls (hotkeys during playback)")
     ctrl.add_argument(
         "--pause-key",
-        default="f8",
+        default=hk.pause,
         help="pause/resume hotkey, e.g. f8 or ctrl+p (default: f8)",
     )
     ctrl.add_argument(
         "--skip-key",
-        default="f9",
+        default=hk.skip,
         help="skip current song hotkey (default: f9)",
     )
     ctrl.add_argument(
         "--quit-key",
-        default="f10",
+        default=hk.quit,
         help="quit playback hotkey (default: f10; Esc not recommended — game may intercept it)",
     )
     ctrl.add_argument(
         "--refocus-key",
-        default="f6",
+        default=hk.refocus,
         help="bring Sky window to foreground hotkey (default: f6)",
     )
     ctrl.add_argument(
         "--panic-key",
-        default="ctrl+alt+backspace",
+        default=hk.panic,
         help="emergency release all keys without stopping playback (default: ctrl+alt+backspace)",
     )
     ctrl.add_argument(
@@ -772,13 +911,18 @@ def build_arg_parser():
     )
     diag.add_argument(
         "--sky-process-names",
-        default="Sky.exe,Sky Children of the Light.exe",
+        default=sky_process_names_csv(),
         help="comma-separated Sky executable names to match (default: Sky.exe,...)",
     )
     diag.add_argument(
         "--allow-title-fallback",
         action="store_true",
         help="allow window title matching when process verification fails",
+    )
+    diag.add_argument(
+        "--compare-profiles",
+        action="store_true",
+        help="print a side-by-side timing comparison table of all profiles and exit",
     )
 
     # ── Telemetry ─────────────────────────────────────────────────────────────
@@ -802,6 +946,22 @@ def build_arg_parser():
         "--inspect-telemetry",
         help="read and summarize telemetry from a .summary.json file or logs/ directory and exit",
     )
+    telem.add_argument(
+        "--auto-calibrate",
+        action="store_true",
+        help=(
+            "analyse the most recent telemetry log and print calibration recommendations "
+            "(profile adjustments, tempo suggestions). Does NOT modify config.json automatically."
+        ),
+    )
+    telem.add_argument(
+        "--apply-calibration",
+        action="store_true",
+        help=(
+            "apply calibration recommendations from the latest telemetry summary to the "
+            "in-memory playback session (does not save config.json)."
+        ),
+    )
 
     # ── Display ───────────────────────────────────────────────────────────────
     disp = parser.add_argument_group("Display")
@@ -824,13 +984,13 @@ def build_arg_parser():
 
     return parser
 
-def configure_from_args(args: argparse.Namespace) -> None:
-    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, SLEEP_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
+def configure_from_args(args: argparse.Namespace, cfg: AppConfig | None = None) -> None:
+    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, SLEEP_POLICY, PLAYBACK_SESSION
+    global TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
     from sky_music.platform.win32 import inputs
     from sky_music.ui import picker as songs
-    from sky_music.domain.scheduler_types import TimingPolicy
-    from sky_music.config import load_config
-    from sky_music.infrastructure.timing import SleepPolicy
+
+    cfg = cfg or load_config()
 
     CURRENT_SCAN_CODE_MODE = args.scan_code_mode
     songs.SONG_DIR = args.songs_dir
@@ -841,98 +1001,17 @@ def configure_from_args(args: argparse.Namespace) -> None:
     TEMPO_SCALE = args.tempo_scale
     if TEMPO_SCALE <= 0:
         raise ValueError("tempo_scale must be > 0")
-    TIMING_PROFILE_NAME = args.timing_profile
     VERBOSE_HUD = args.verbose_hud
 
     if PLAYBACK_DEBUG:
         init_debug_log()
 
-    # Determine base TimingPolicy from persistent profile in config or fallbacks
-    profile = args.timing_profile.lower().replace("-", "_")
-    user_cfg = load_config()
-    
-    if profile in user_cfg.timing_profiles:
-        p_dict = user_cfg.timing_profiles[profile]
-    else:
-        fallback_profile = user_cfg.default_timing_profile.lower().replace("-", "_")
-        p_dict = user_cfg.timing_profiles.get(fallback_profile, user_cfg.timing_profiles["balanced"])
-        
-    base_spin_threshold_us = p_dict.get("spin_threshold_us", 500)
-    policy = TimingPolicy(
-        hold_us=p_dict.get("hold_us", 24_000),
-        min_hold_us=p_dict.get("min_hold_us", 12_000),
-        release_gap_us=p_dict.get("release_gap_us", 3_000),
-        repeat_release_gap_us=p_dict.get("repeat_release_gap_us", 2_000),
-        min_scheduled_hold_us=p_dict.get("min_scheduled_hold_us", 500),
-        input_lead_us=p_dict.get("input_lead_us", 0),
-        chord_merge_window_us=p_dict.get("chord_merge_window_us", 0),
-        focus_restore_grace_us=p_dict.get("focus_restore_grace_us", 100_000),
-        same_key_conflict_policy=p_dict.get("same_key_conflict_policy", "degraded")
-    )
-
-    # Perform overrides from arguments
-    hold_us = args.hold_ms * 1000 if args.hold_ms is not None else policy.hold_us
-    min_hold_us = args.min_hold_ms * 1000 if args.min_hold_ms is not None else policy.min_hold_us
-    release_gap_us = args.release_gap_ms * 1000 if args.release_gap_ms is not None else policy.release_gap_us
-    repeat_release_gap_us = args.repeat_release_gap_ms * 1000 if args.repeat_release_gap_ms is not None else policy.repeat_release_gap_us
-    input_lead_us = getattr(args, "input_lead_ms", None)
-    if input_lead_us is not None:
-        input_lead_us = input_lead_us * 1000
-    else:
-        input_lead_us = policy.input_lead_us
-        
-    chord_merge_window_us = getattr(args, "chord_merge_window_ms", None)
-    if chord_merge_window_us is not None:
-        chord_merge_window_us = chord_merge_window_us * 1000
-    else:
-        chord_merge_window_us = policy.chord_merge_window_us
-
-    spin_threshold_us = getattr(args, "spin_threshold_us", None)
-    if spin_threshold_us is None:
-        spin_threshold_us = base_spin_threshold_us
-
-    focus_restore_grace_us = getattr(args, "focus_restore_grace_ms", None)
-    if focus_restore_grace_us is not None:
-        focus_restore_grace_us = focus_restore_grace_us * 1000
-    else:
-        focus_restore_grace_us = policy.focus_restore_grace_us
-    
-    min_scheduled_hold_us = getattr(args, "min_scheduled_hold_ms", None)
-    if min_scheduled_hold_us is not None:
-        min_scheduled_hold_us = min_scheduled_hold_us * 1000
-    else:
-        min_scheduled_hold_us = policy.min_scheduled_hold_us
-
-    same_key_conflict_policy = args.same_key_conflict_policy if args.same_key_conflict_policy is not None else policy.same_key_conflict_policy
-
-    TIMING_POLICY = TimingPolicy(
-        hold_us=hold_us,
-        min_hold_us=min_hold_us,
-        release_gap_us=release_gap_us,
-        repeat_release_gap_us=repeat_release_gap_us,
-        min_scheduled_hold_us=min_scheduled_hold_us,
-        input_lead_us=input_lead_us,
-        chord_merge_window_us=chord_merge_window_us,
-        focus_restore_grace_us=focus_restore_grace_us,
-        same_key_conflict_policy=same_key_conflict_policy
-    )
-
-    # Upgrade to FrameTimingPolicy when --fps is provided
-    fps_hint = getattr(args, "fps", None)
-    if fps_hint is not None and fps_hint > 0:
-        from sky_music.domain.scheduler_types import FrameTimingPolicy
-        TIMING_POLICY = FrameTimingPolicy.from_timing_policy(
-            TIMING_POLICY,
-            fps=fps_hint,
-            same_key_conflict_policy=same_key_conflict_policy,
-        )
-        # Reflect fps-aware hold_us back so post-run report shows correct profile
-        TIMING_PROFILE_NAME = f"{args.timing_profile}@{fps_hint}fps"
-
-    SLEEP_POLICY = SleepPolicy(
-        spin_threshold_us=spin_threshold_us,
-        poll_s=0.025
-    )
+    session = PlaybackSessionContext.from_cli_args(args, cfg)
+    spin_override = getattr(args, "spin_threshold_us", None)
+    PLAYBACK_SESSION = session
+    TIMING_POLICY = session.resolve_effective_policy(cfg)
+    SLEEP_POLICY = session.resolve_sleep_policy(cfg, spin_threshold_us=spin_override)
+    TIMING_PROFILE_NAME = session.display_profile_label()
 
     if args.sky_process_names:
         inputs.EXPECTED_PROCESS_NAMES = {
@@ -986,14 +1065,26 @@ def prompt_song_selection(
     tempo: float = 1.0,
     dry_run: bool = False,
     fps: int | None = None,
+    scan_code_mode: str = "physical",
 ) -> "SongPickerResult | None":
     from sky_music.ui import picker as songs
+    session = merge_session_with_overrides(
+        PLAYBACK_SESSION or PlaybackSessionContext.balanced(
+            tempo_scale=tempo,
+            fps=fps,
+            scan_code_mode=scan_code_mode,
+        ),
+        profile=profile,
+        tempo=tempo,
+        fps=fps,
+    )
     if songs.HAS_PROMPT_TOOLKIT:
         return songs.choose_song_interactively(
-            initial_profile=profile,
-            initial_tempo=tempo,
+            initial_profile=session.profile_name,
+            initial_tempo=session.tempo_scale,
+            initial_fps=session.fps,
             initial_dry_run=dry_run,
-            initial_fps=fps,
+            scan_code_mode=session.scan_code_mode,
         )
 
     # Fallback CLI mode (no prompt_toolkit)
@@ -1033,6 +1124,7 @@ def print_choices_local(song_choices: list[Path]) -> None:
         print(f"  {index:>2}) {path.stem}")
 
 def main() -> int:
+    global TIMING_PROFILE_NAME, TEMPO_SCALE, DRY_RUN_MODE, PLAYBACK_SESSION, TIMING_POLICY, SLEEP_POLICY
     if sys.platform == 'win32':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
@@ -1040,14 +1132,12 @@ def main() -> int:
         except Exception:
             pass
 
+    user_cfg = load_config()
     parser = build_arg_parser()
     args = parser.parse_args()
 
-    # P4: Load user config and apply saved defaults (CLI flags override these)
-    user_cfg = load_config()
     apply_config_defaults(args, user_cfg)
-
-    configure_from_args(args)
+    configure_from_args(args, user_cfg)
     try:
         controls = build_playback_controls(args)
     except ValueError as exc:
@@ -1056,6 +1146,18 @@ def main() -> int:
     if args.inspect_telemetry is not None:
         from sky_music.orchestration.telemetry import inspect_telemetry_report
         inspect_telemetry_report(args.inspect_telemetry)
+        return 0
+
+    if getattr(args, "compare_profiles", False):
+        _print_profile_comparison_table(user_cfg)
+        return 0
+
+    if getattr(args, "apply_calibration", False):
+        if not _apply_calibration_from_telemetry(user_cfg):
+            return 1
+
+    if getattr(args, "auto_calibrate", False):
+        _run_auto_calibrate()
         return 0
 
     if args.doctor or args.doctor_timing or args.doctor_input:
@@ -1108,12 +1210,7 @@ def main() -> int:
                     selected_song,
                     args.countdown,
                     controls=controls,
-                    overrides=PlaybackOverrides(
-                        dry_run=DRY_RUN_MODE,
-                        profile=TIMING_PROFILE_NAME,
-                        tempo=TEMPO_SCALE,
-                        fps=getattr(args, "fps", None)
-                    )
+                    overrides=PlaybackOverrides(dry_run=DRY_RUN_MODE),
                 )
                 if result == PLAYBACK_QUIT:
                     return 0
@@ -1123,10 +1220,11 @@ def main() -> int:
 
         while True:
             picker_result = prompt_song_selection(
-                profile=TIMING_PROFILE_NAME,
+                profile=canonical_profile_name(user_cfg.default_timing_profile),
                 tempo=TEMPO_SCALE,
                 dry_run=DRY_RUN_MODE,
-                fps=getattr(args, "fps", None)
+                fps=getattr(args, "fps", None),
+                scan_code_mode=CURRENT_SCAN_CODE_MODE,
             )
             if picker_result is None:
                 return 0
@@ -1148,6 +1246,30 @@ def main() -> int:
             )
             if result == PLAYBACK_QUIT:
                 return 0
+            
+            # P0 Fix: Update persistent loop state with picker decision
+            # (Allows picker changes to persist across multiple songs)
+            PLAYBACK_SESSION = merge_session_with_overrides(
+                PLAYBACK_SESSION or PlaybackSessionContext.balanced(
+                    tempo_scale=TEMPO_SCALE,
+                    scan_code_mode=CURRENT_SCAN_CODE_MODE,
+                ),
+                profile=picker_result.profile_name,
+                tempo=picker_result.tempo_scale,
+                fps=picker_result.fps,
+            )
+            TIMING_PROFILE_NAME = PLAYBACK_SESSION.display_profile_label()
+            TEMPO_SCALE = PLAYBACK_SESSION.tempo_scale
+            DRY_RUN_MODE = (picker_result.action == "dry_run")
+            TIMING_POLICY = PLAYBACK_SESSION.resolve_effective_policy(user_cfg)
+            SLEEP_POLICY = PLAYBACK_SESSION.resolve_sleep_policy(user_cfg)
+
+            user_cfg.default_timing_profile = PLAYBACK_SESSION.profile_name
+            user_cfg.default_tempo_scale = TEMPO_SCALE
+            if picker_result.fps is not None:
+                user_cfg.game_fps = picker_result.fps
+            save_config(user_cfg)
+
             if result == PLAYBACK_SKIPPED:
                 time.sleep(0.5)
             else:

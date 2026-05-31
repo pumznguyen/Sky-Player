@@ -1,38 +1,102 @@
 import sys
 from pathlib import Path
+import json
 import pytest
+from sky_music.config import AppConfig, clear_config_cache, HotkeyDefaults
 
 src_dir = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(src_dir))
 
 import main
 
+@pytest.fixture(autouse=True)
+def _reset_config_cache():
+    clear_config_cache()
+    yield
+    clear_config_cache()
+
 def test_timing_profile_parsing():
-    """Verify that specifying a timing profile configures the global TimingPolicy correctly."""
     parser = main.build_arg_parser()
     
     # 1. Test balanced profile (default)
     args = parser.parse_args(["--timing-profile", "balanced"])
-    main.configure_from_args(args)
+    main.configure_from_args(args, AppConfig())
     assert main.TIMING_POLICY.hold_us == 24_000
     assert main.TIMING_POLICY.min_hold_us == 12_000
     assert main.TIMING_POLICY.release_gap_us == 3_000
-    
-    # 2. Test local-precise profile
+
+
+def test_local_precise_profile_from_builtin_defaults():
+    parser = main.build_arg_parser()
     args = parser.parse_args(["--timing-profile", "local-precise"])
-    main.configure_from_args(args)
-    # 20000us base scales to 20834us at 60 FPS (1.25 frames)
-    assert main.TIMING_POLICY.hold_us in (20_000, 20_834)
-    assert main.TIMING_POLICY.min_hold_us == 12_000
-    
-    # 3. Test remote-safe profile
-    args = parser.parse_args(["--timing-profile", "remote-safe"])
-    main.configure_from_args(args)
-    assert main.TIMING_POLICY.hold_us == 30_000
-    assert main.TIMING_POLICY.min_hold_us == 15_000
+    main.configure_from_args(args, AppConfig())
+    assert main.TIMING_POLICY.hold_us == 20_000
+    assert main.SLEEP_POLICY.spin_threshold_us == 800
+
+
+def test_saved_profile_restored_with_fps_config():
+    """Profile must survive restart when game_fps is set (no @fps suffix in storage)."""
+    from sky_music.config import canonical_profile_name
+
+    cfg = AppConfig(default_timing_profile="remote-safe", default_tempo_scale=0.95, game_fps=60)
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    assert args.timing_profile == "remote-safe"
+    assert args.fps == 60
+
+    main.configure_from_args(args, cfg)
+    assert main.TIMING_PROFILE_NAME == "remote-safe@60fps"
+    assert canonical_profile_name(main.TIMING_PROFILE_NAME) == "remote-safe"
+
+    # Simulate picker init on next launch
+    assert canonical_profile_name(cfg.default_timing_profile) == "remote-safe"
+
+
+def test_picker_metadata_loads_song_stats():
+    from pathlib import Path
+    from sky_music.ui.picker_metadata import get_song_ui_metadata, clear_metadata_cache
+
+    clear_metadata_cache()
+    meta = get_song_ui_metadata(Path("songs/1test copy.json"))
+    assert meta.note_count > 0
+    assert meta.duration_seconds > 0
+
+
+def test_display_profile_name_no_double_fps_suffix():
+    from sky_music.config import display_profile_name
+
+    assert display_profile_name("remote-safe@120fps", 120) == "remote-safe@120fps"
+
+
+def test_canonical_profile_name_strips_fps_suffix():
+    from sky_music.config import canonical_profile_name
+
+    assert canonical_profile_name("remote-safe@60fps") == "remote-safe"
+    assert canonical_profile_name("local_precise") == "local-precise"
+    assert canonical_profile_name("dense-safe@120fps") == "dense-safe"
+
+
+def test_load_config_sanitizes_corrupted_profile_with_fps_suffix(tmp_path, monkeypatch):
+    from sky_music.config import load_config, clear_config_cache
+
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        json.dumps({
+            "default_timing_profile": "remote-safe@60fps",
+            "default_tempo_scale": 0.95,
+            "game_fps": 60,
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sky_music.config.CONFIG_PATH", config_file)
+    clear_config_cache()
+    cfg = load_config(force_reload=True)
+    assert cfg.default_timing_profile == "remote-safe"
+    assert cfg.game_fps == 60
+
 
 def test_timing_overrides_parsing():
-    """Verify custom command-line overrides successfully take precedence over profile policies."""
     parser = main.build_arg_parser()
     args = parser.parse_args([
         "--timing-profile", "balanced",
@@ -41,18 +105,167 @@ def test_timing_overrides_parsing():
         "--release-gap-ms", "5",
         "--repeat-release-gap-ms", "4"
     ])
-    main.configure_from_args(args)
-    
+    main.configure_from_args(args, AppConfig())
     assert main.TIMING_POLICY.hold_us == 30_000
     assert main.TIMING_POLICY.min_hold_us == 15_000
     assert main.TIMING_POLICY.release_gap_us == 5_000
     assert main.TIMING_POLICY.repeat_release_gap_us == 4_000
 
 def test_dry_run_simulation_flag():
-    """Verify that specifying dry-run and debug-csv configures active states cleanly."""
     parser = main.build_arg_parser()
-    args = parser.parse_args(["--dry-run", "--debug-csv"])
-    main.configure_from_args(args)
-    
+    args = parser.parse_args(["--dry-run"])
+    main.configure_from_args(args, AppConfig())
     assert main.DRY_RUN_MODE is True
+
+def test_tempo_scale_parsing():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--tempo-scale", "0.85"])
+    main.configure_from_args(args, AppConfig())
+    assert main.TEMPO_SCALE == 0.85
+
+def test_tempo_scale_invalid_fails():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--tempo-scale", "-1.0"])
+    with pytest.raises(ValueError, match="tempo_scale must be > 0"):
+        main.configure_from_args(args, AppConfig())
+
+def test_hotkey_overlap_detection():
+    # Test that overlapping hotkeys raise ValueError (Default behavior)
+    parser = main.build_arg_parser()
+    # 'y' is a note key (Key0)
+    args = parser.parse_args(["--pause-key", "y"])
+    with pytest.raises(ValueError, match="Hotkey overlaps with note keys"):
+        main.build_playback_controls(args)
+
+def test_hotkey_overlap_allowed_with_flag():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--pause-key", "y", "--allow-note-hotkeys"])
+    controls = main.build_playback_controls(args)
+    assert controls.pause.name == "y"
+
+def test_telemetry_csv_default_from_config():
+    # Mock config with telemetry enabled
+    cfg = AppConfig(telemetry_enabled_by_default=True)
+    parser = main.build_arg_parser()
+    args = parser.parse_args([]) # No CLI flags
+    main.apply_config_defaults(args, cfg)
+    main.configure_from_args(args, cfg)
     assert main.TELEMETRY_CSV_ENABLED is True
+
+def test_verbose_hud_default_from_config():
+    cfg = AppConfig(verbose_hud=True)
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    main.configure_from_args(args, cfg)
+    assert main.VERBOSE_HUD is True
+
+def test_game_fps_default_from_config():
+    cfg = AppConfig(game_fps=120)
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    main.configure_from_args(args, cfg)
+    # Check that TIMING_POLICY is now a FrameTimingPolicy with 120 FPS
+    from sky_music.domain.scheduler_types import FrameTimingPolicy
+    assert isinstance(main.TIMING_POLICY, FrameTimingPolicy)
+    assert main.TIMING_POLICY.fps == 120
+
+def test_config_fps_override_by_cli():
+    cfg = AppConfig(game_fps=60)
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--fps", "30"])
+    main.apply_config_defaults(args, cfg)
+    main.configure_from_args(args, cfg)
+    assert main.TIMING_POLICY.fps == 30
+
+def test_no_fps_config_or_cli_stays_unframed():
+    cfg = AppConfig(game_fps=0) # Assume 0 means disabled in config too
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    main.configure_from_args(args, cfg)
+    assert main.TIMING_POLICY.fps == 0
+    assert main.TIMING_POLICY.hold_us == 24_000
+
+def test_hotkeys_default_from_config():
+    cfg = AppConfig(hotkeys=HotkeyDefaults(pause="f7", skip="f11"))
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    assert args.pause_key == "f7"
+    assert args.skip_key == "f11"
+
+
+def test_sky_process_names_default_from_config():
+    cfg = AppConfig(sky_process_names=["CustomSky.exe"])
+    parser = main.build_arg_parser()
+    args = parser.parse_args([])
+    main.apply_config_defaults(args, cfg)
+    assert args.sky_process_names == "CustomSky.exe"
+
+
+def test_calibrate_advisory_moderate_jitter():
+    from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
+    inp = CalibrationInput(
+        profile_name="balanced", tempo_scale=1.0, fps=60,
+        p95_lateness_us=2000, p99_lateness_us=9000,
+        p95_send_duration_us=1000, late_over_10ms=0,
+        impossible_same_key_repeats=0, risky_same_key_repeats=0,
+        failed_release_count=0
+    )
+    rec = calibrate_profile(inp)
+    assert rec.severity == "moderate"
+    assert rec.profile_name == "balanced"
+    assert rec.tempo_scale == 0.95
+
+def test_calibrate_advisory_severe_jitter():
+    from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
+    inp = CalibrationInput(
+        profile_name="balanced", tempo_scale=1.0, fps=60,
+        p95_lateness_us=5000, p99_lateness_us=16000,
+        p95_send_duration_us=2000, late_over_10ms=10,
+        impossible_same_key_repeats=0, risky_same_key_repeats=0,
+        failed_release_count=0
+    )
+    rec = calibrate_profile(inp)
+    assert rec.severity == "severe"
+    assert rec.profile_name == "dense-safe"
+    assert rec.tempo_scale == 0.90
+
+
+def test_calibrate_hold_uses_frame_timing_policy():
+    from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
+
+    inp = CalibrationInput(
+        profile_name="balanced",
+        tempo_scale=1.0,
+        fps=30,
+        p95_lateness_us=1000,
+        p99_lateness_us=2000,
+        p95_send_duration_us=500,
+        late_over_10ms=0,
+        impossible_same_key_repeats=0,
+        risky_same_key_repeats=0,
+        failed_release_count=0,
+    )
+    rec = calibrate_profile(inp)
+    assert rec.profile_name == "local-precise"
+    assert rec.hold_us == 41_667
+    assert rec.input_lead_us >= 16_666
+
+
+def test_frame_timing_defaults_from_config(tmp_path, monkeypatch):
+    from sky_music.config import FrameTimingDefaults, load_config
+
+    cfg_path = tmp_path / "config.json"
+    cfg_path.write_text(
+        '{"frame_timing": {"min_hold_min_frame_ratio": 0.75, "repeat_release_gap_min_frame_ratio": 0.2}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("sky_music.config.CONFIG_PATH", cfg_path)
+    clear_config_cache()
+    cfg = load_config()
+    assert cfg.frame_timing.min_hold_min_frame_ratio == 0.75
+    assert cfg.frame_timing.repeat_release_gap_min_frame_ratio == 0.2
+    assert cfg.frame_timing.min_visible_hold_frames == FrameTimingDefaults.min_visible_hold_frames

@@ -8,6 +8,7 @@ sys.path.insert(0, str(src_dir))
 
 from sky_music.domain import Song, Note, NoteKey, Millis
 from sky_music.domain.scheduler import build_key_actions
+from sky_music.domain.scheduler_types import TimingPolicy, FrameTimingPolicy
 
 def get_golden_songs():
     songs = {}
@@ -78,8 +79,10 @@ def generate_snapshots():
 
     print(f"Generating golden schedule snapshots to: {snapshots_dir.resolve()}")
 
+    policy = FrameTimingPolicy.from_timing_policy(TimingPolicy.from_dict({"input_lead_us": 0}))
+
     for key, song in songs.items():
-        res = build_key_actions(song)
+        res = build_key_actions(song, policy=policy)
         actions = res.actions
         
         # Serialize actions to match KeyAction data fields

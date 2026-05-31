@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from sky_music.domain.session_context import PlaybackSessionContext
+
 @dataclass(frozen=True, slots=True)
 class SongUiMetadata:
     path: Path
@@ -22,33 +24,42 @@ class SongUiMetadata:
     chords_count: int = 0
     timing_stress_rate: float = 0.0
 
-_metadata_cache: dict[Path, SongUiMetadata] = {}
+_metadata_cache: dict[tuple, SongUiMetadata] = {}
 
-def get_song_ui_metadata(song_path: Path) -> SongUiMetadata:
+def get_song_ui_metadata(
+    song_path: Path,
+    session: PlaybackSessionContext | None = None,
+) -> SongUiMetadata:
+    session = session or PlaybackSessionContext.balanced()
     try:
         from sky_music.domain.parser import parse_song_file
         from sky_music.domain.scheduler import build_key_actions
         from sky_music.domain.analyzer import analyze_schedule
-        from sky_music.domain.scheduler_types import TimingPolicy
-        
+
         import sys
         resolver = None
         if sys.platform == "win32":
             from sky_music.platform.win32.keycodes import Win32NoteResolver
             from sky_music.layouts import SKY_15_KEY_PROFILE
             resolver = Win32NoteResolver(SKY_15_KEY_PROFILE)
-            
+
         song = parse_song_file(song_path)
-        policy = TimingPolicy()
-        sched = build_key_actions(song, policy=policy, scan_code_mode="physical", resolver=resolver, tempo_scale=1.0)
+        policy = session.resolve_effective_policy()
+        sched = build_key_actions(
+            song,
+            policy=policy,
+            scan_code_mode=session.scan_code_mode,
+            resolver=resolver,
+            tempo_scale=session.tempo_scale,
+        )
         report = analyze_schedule(sched, raw_notes=song.notes)
-        
+
         rec_profile = report.suggested_profile
         rec_tempo = report.suggested_tempo_scale
-            
+
         min_note_gap = (report.min_any_note_gap_us / 1000.0) if report.min_any_note_gap_us is not None else 0.0
         min_repeat_gap = (report.min_same_key_gap_us / 1000.0) if report.min_same_key_gap_us is not None else 0.0
-        
+
         return SongUiMetadata(
             path=song_path,
             name=song.name or song_path.stem,
@@ -89,14 +100,22 @@ def get_song_ui_metadata(song_path: Path) -> SongUiMetadata:
             timing_stress_rate=0.0
         )
 
-def get_cached_song_ui_metadata(song_path: Path) -> SongUiMetadata:
-    if song_path not in _metadata_cache:
-        _metadata_cache[song_path] = get_song_ui_metadata(song_path)
-    return _metadata_cache[song_path]
+def get_cached_song_ui_metadata(
+    song_path: Path,
+    session: PlaybackSessionContext | None = None,
+) -> SongUiMetadata:
+    session = session or PlaybackSessionContext.balanced()
+    cache_key = session.metadata_cache_key(song_path)
+    if cache_key not in _metadata_cache:
+        _metadata_cache[cache_key] = get_song_ui_metadata(song_path, session)
+    return _metadata_cache[cache_key]
 
 def clear_metadata_cache() -> None:
     _metadata_cache.clear()
 
-def _get_song_recommendation(song_path: Path) -> tuple[str, float]:
-    meta = get_cached_song_ui_metadata(song_path)
+def _get_song_recommendation(
+    song_path: Path,
+    session: PlaybackSessionContext | None = None,
+) -> tuple[str, float]:
+    meta = get_cached_song_ui_metadata(song_path, session)
     return meta.recommended_profile, meta.recommended_tempo_scale
