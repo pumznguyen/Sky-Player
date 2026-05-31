@@ -26,6 +26,7 @@ class TelemetryLogger:
         self.log_filepath = None
         self.backend_health: BackendHealth | None = None
         self.release_outcome = None
+        self.schedule_summary: dict | None = None
         
         # Unique run ID generation
         if run_id is None:
@@ -72,6 +73,17 @@ class TelemetryLogger:
     def record_release_outcome(self, outcome) -> None:
         """Stores the final release_all outcome at the end of playback."""
         self.release_outcome = outcome
+
+    def record_schedule_metadata(self, metadata) -> None:
+        """Stores scheduler stress metrics for later calibration."""
+        self.schedule_summary = {
+            "compressed_holds": int(getattr(metadata, "compressed_holds", 0)),
+            "impossible_same_key_repeats": int(getattr(metadata, "impossible_same_key_repeats", 0)),
+            "risky_same_key_repeats": int(getattr(metadata, "risky_same_key_repeats", 0)),
+            "max_polyphony": int(getattr(metadata, "max_polyphony", 0)),
+            "note_count": int(getattr(metadata, "note_count", 0)),
+            "shortest_same_key_interval_us": getattr(metadata, "shortest_same_key_interval_us", None),
+        }
 
     def get_summary(self) -> dict | None:
         """Compute and return the stats dict in-memory (no file I/O).
@@ -136,7 +148,7 @@ class TelemetryLogger:
             backend_info["release_stuck_keys"] = self.release_outcome.stuck_keys
             backend_info["release_inconclusive"] = self.release_outcome.verification_inconclusive
 
-        return {
+        summary = {
             "run_id": self.run_id,
             "song": self.song_name,
             "profile": self.profile_name,
@@ -148,6 +160,9 @@ class TelemetryLogger:
             "note_hold_duration_us": _stats(hold_durations),
             "backend": backend_info,
         }
+        if self.schedule_summary is not None:
+            summary["schedule"] = self.schedule_summary
+        return summary
         
     def save(self) -> None:
         if not self.enabled or not self.log_filepath or not self.records:

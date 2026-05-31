@@ -130,11 +130,12 @@ graph LR
 ### Phase 7: Calibration & Profiles
 *   **Goal**: Allow flexible performance tuning.
 *   **Deliverables**:
-    *   Three predefined timing profiles:
-        *   `fast`: 16ms hold, 8ms min-hold, 2ms gap.
-        *   `balanced`: 24ms hold, 12ms min-hold, 3ms gap (Default).
-        *   `conservative`: 34ms hold, 16ms min-hold, 5ms gap.
-    *   CLI options: `--timing-profile`, `--hold-ms`, `--min-hold-ms`, `--release-gap-ms`, `--debug-csv`.
+    *   Four predefined timing profiles:
+        *   `local-precise`: low-latency local playback.
+        *   `balanced`: default general-purpose timing.
+        *   `remote-safe`: longer holds and gaps for remote/listener clarity.
+        *   `dense-safe`: safer handling for dense chords and repeats.
+    *   CLI options: `--timing-profile`, `--hold-ms`, `--min-hold-ms`, `--release-gap-ms`, `--fps`, `--debug-csv`.
     *   `docs/timing-calibration.md`: Instruction guide detailing how to read CSV log drift and select optimal timing profiles for custom rigs.
 *   **Pass Criteria**: Overrides parse correctly and customize scheduled `KeyAction` bounds.
 

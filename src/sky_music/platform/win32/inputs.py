@@ -138,7 +138,7 @@ def disable_high_precision_timers() -> None:
     winmm.timeEndPeriod(TIMER_RESOLUTION_MS)
     _timer_resolution_enabled = False
 
-def wait_seconds(seconds: float) -> None:
+def _retry_wait_seconds(seconds: float) -> None:
     if seconds <= 0:
         return
     deadline = time.perf_counter() + seconds
@@ -179,7 +179,7 @@ def send_input_batch(inputs: list[INPUT]) -> None:
                 f"Possible reasons: Sky is elevated (Admin) while this script is not (UIPI mismatch), "
                 f"or target window handles became invalid."
             )
-        wait_seconds(0.002)
+        _retry_wait_seconds(0.002)
 
 def send_scan_code_batch(scan_codes: tuple[int, ...] | list[int], key_up: bool = False) -> None:
     if not scan_codes:

@@ -47,7 +47,7 @@ class TimingPolicy:
     chord_merge_window_us: Microseconds = Microseconds(0)
     focus_restore_grace_us: Microseconds = Microseconds(100_000) # Default is overridden in from_dict
 
-    same_key_conflict_policy: Literal["degraded", "strict", "adaptive"] = "degraded"
+    same_key_conflict_policy: Literal["degraded", "strict"] = "degraded"
 
     @classmethod
     def from_dict(cls, p_dict: dict, **kwargs) -> "TimingPolicy":
@@ -63,7 +63,11 @@ class TimingPolicy:
             input_lead_us=Microseconds(p_dict.get("input_lead_us", base["input_lead_us"])),
             chord_merge_window_us=Microseconds(p_dict.get("chord_merge_window_us", base["chord_merge_window_us"])),
             focus_restore_grace_us=Microseconds(p_dict.get("focus_restore_grace_us", base["focus_restore_grace_us"])),
-            same_key_conflict_policy=p_dict.get("same_key_conflict_policy", "degraded"),
+            same_key_conflict_policy=(
+                p_dict.get("same_key_conflict_policy", "degraded")
+                if p_dict.get("same_key_conflict_policy", "degraded") in ("degraded", "strict")
+                else "degraded"
+            ),
             **kwargs
         )
 
@@ -108,7 +112,7 @@ class FrameTimingPolicy:
 
     min_visible_hold_frames: float = 1.25
     chord_merge_max_frame_ratio: float = 0.25
-    same_key_conflict_policy: Literal["degraded", "strict", "adaptive"] = "degraded"
+    same_key_conflict_policy: Literal["degraded", "strict"] = "degraded"
     frame_align: FrameAlignMode = "none"
 
     @classmethod
@@ -118,7 +122,7 @@ class FrameTimingPolicy:
         fps: int | None = None,
         min_visible_hold_frames: float = 1.25,
         chord_merge_max_frame_ratio: float = 0.25,
-        same_key_conflict_policy: Literal["degraded", "strict", "adaptive"] | None = None,
+        same_key_conflict_policy: Literal["degraded", "strict"] | None = None,
         input_lead_min_frame_ratio: float = 0.5,
         release_gap_min_frame_ratio: float = 0.15,
         repeat_release_gap_min_frame_ratio: float = 0.10,
@@ -145,7 +149,7 @@ class FrameTimingPolicy:
             eff_repeat_release_gap_us = policy.repeat_release_gap_us
             
         conflict_policy = same_key_conflict_policy if same_key_conflict_policy is not None else policy.same_key_conflict_policy
-        if conflict_policy not in ("strict", "degraded", "adaptive"):
+        if conflict_policy not in ("strict", "degraded"):
             conflict_policy = "degraded"
 
         align_mode: FrameAlignMode = frame_align if frame_align in ("none", "down_only") else "none"

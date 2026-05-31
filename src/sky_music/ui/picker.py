@@ -65,7 +65,7 @@ class PickerState:
     selected_index: int = 0
     filtered_songs: list[Path] = None  # type: ignore
     
-    current_view: Literal["picker", "preview", "profile_select", "tempo_select", "fps_select", "help"] = "picker"
+    current_view: Literal["picker", "preview", "profile_select", "tempo_select", "fps_select", "calibration", "help"] = "picker"
     previous_view: Literal["picker", "preview"] = "picker"
     
     current_profile: str = "balanced"
@@ -140,7 +140,20 @@ def choose_song_interactively(
     if not song_choices:
         return None
 
-    from sky_music.config import load_config, save_config, canonical_profile_name
+    from sky_music.config import (
+        load_config,
+        save_config,
+        canonical_profile_name,
+        persist_calibration_defaults,
+        persist_default_fps,
+        persist_default_profile,
+        persist_default_tempo,
+    )
+    from sky_music.orchestration.calibration import (
+        calibrate_profile,
+        calibration_input_from_summary,
+        load_latest_telemetry_summary,
+    )
 
     state = PickerState(song_choices=song_choices)
     state.current_profile = canonical_profile_name(initial_profile)
@@ -226,12 +239,13 @@ def choose_song_interactively(
                 return 10, 3
             else:
                 return max(3, available), 0
-        elif state.current_view in {"profile_select", "tempo_select", "fps_select", "help"}:
+        elif state.current_view in {"profile_select", "tempo_select", "fps_select", "calibration", "help"}:
             overhead = 8
             available = max(0, term_height - overhead)
             if state.current_view == "profile_select": return min(len(PROFILES_INFO) + 2, available), 0
             if state.current_view == "tempo_select": return min(len(TEMPO_OPTIONS) + 3, available), 0
             if state.current_view == "fps_select": return min(len(FPS_OPTIONS) + 3, available), 0
+            if state.current_view == "calibration": return min(10, available), 0
             if state.current_view == "help": return min(17, available), 0
         return 13, 5
 
@@ -260,7 +274,8 @@ def choose_song_interactively(
 
         mode_label = {
             "picker": "Picker", "preview": "Preview", "profile_select": "Profile Selection",
-            "tempo_select": "Tempo Adjustment", "fps_select": "FPS Selection", "help": "Help Guide"
+            "tempo_select": "Tempo Adjustment", "fps_select": "FPS Selection",
+            "calibration": "Calibration", "help": "Help Guide"
         }.get(state.current_view, "Picker")
 
         dry_str = "ON" if state.dry_run_mode else "OFF"
@@ -345,10 +360,31 @@ def choose_song_interactively(
                 content.append([("class:selected" if val == state.temp_fps else "class:unselected", f" {'➜' if val == state.temp_fps else ' '} {row}")])
             return build_box("FPS Sync Selection", content, width=terminal_width)
 
+        elif state.current_view == "calibration":
+            summary = load_latest_telemetry_summary()
+            if summary is None:
+                return build_box(
+                    "Telemetry Calibration",
+                    ["No telemetry summary found in logs/.", "Run playback with --debug-csv first."],
+                    width=terminal_width,
+                )
+            inp = calibration_input_from_summary(summary)
+            rec = calibrate_profile(inp)
+            content = [
+                f"Latest: {summary.get('song', 'Unknown')} @ {inp.fps} FPS",
+                f"Profile: {inp.profile_name} -> {rec.profile_name}",
+                f"Tempo:   {inp.tempo_scale:.2f}x -> {rec.tempo_scale:.2f}x",
+                f"Lead:    {rec.input_lead_us / 1000:.1f}ms",
+                f"Hold:    {rec.hold_us / 1000:.1f}ms",
+                f"Severity {rec.severity.upper()}",
+                rec.reason,
+            ]
+            return build_box("Telemetry Calibration", content, width=terminal_width)
+
         elif state.current_view == "help":
             help_lines = [
                 ("Enter", "Play selected song"), ("Space", "Quick Play"), ("V", "View song details"),
-                ("P", "Timing Profile"), ("T", "Adjust Tempo"), ("F", "FPS Selection"),
+                ("P", "Timing Profile"), ("T", "Adjust Tempo"), ("F", "FPS Selection"), ("C", "Calibration"),
                 ("D", "Toggle Dry-Run"), ("F2/F3", "HUD/Telemetry"), ("Ctrl+T/R", "Theme/Reload"),
                 ("H/Esc", "Help / Back")
             ]
@@ -400,6 +436,7 @@ def choose_song_interactively(
                 ActionHint("P", "profile", "prof", "p"),
                 ActionHint("T", "tempo", "tempo", "t"),
                 ActionHint("F", "fps", "fps", "f"),
+                ActionHint("C", "calib", "cal", "c"),
                 ActionHint("D", "dry-run", "dry", "d"),
                 ActionHint("F2", "HUD", "hud", "h2"),
                 ActionHint("F3", "telemetry", "telem", "h3"),
@@ -472,6 +509,12 @@ def choose_song_interactively(
     def _(event):
         state.previous_view, state.current_view, state.temp_fps = state.current_view, "fps_select", state.current_fps
         update_ui()
+
+    @kb.add("c")
+    def _(event):
+        if state.current_view in {"picker", "preview"}:
+            state.previous_view, state.current_view = state.current_view, "calibration"
+            update_ui()
 
     @kb.add("v")
     def _(event):
@@ -556,31 +599,40 @@ def choose_song_interactively(
         elif state.current_view == "profile_select":
             state.current_profile, state.current_view = state.temp_profile, "picker"
             try:
-                from sky_music.config import load_config, save_config
-                cfg = load_config()
-                cfg.default_timing_profile = canonical_profile_name(state.current_profile)
-                save_config(cfg)
+                persist_default_profile(load_config(), state.current_profile)
             except Exception:
                 pass
         elif state.current_view == "tempo_select":
             state.current_tempo, state.current_view = state.temp_tempo, "picker"
             try:
-                from sky_music.config import load_config, save_config
-                cfg = load_config()
-                cfg.default_tempo_scale = state.current_tempo
-                save_config(cfg)
+                persist_default_tempo(load_config(), state.current_tempo)
             except Exception:
                 pass
         elif state.current_view == "fps_select":
             state.current_fps, state.current_view = state.temp_fps, "picker"
             try:
-                from sky_music.config import load_config, save_config
-                cfg = load_config()
-                if state.current_fps is not None:
-                    cfg.game_fps = state.current_fps
-                save_config(cfg)
+                persist_default_fps(load_config(), state.current_fps)
             except Exception:
                 pass
+        elif state.current_view == "calibration":
+            summary = load_latest_telemetry_summary()
+            if summary is not None:
+                try:
+                    inp = calibration_input_from_summary(summary)
+                    rec = calibrate_profile(inp)
+                    persist_calibration_defaults(
+                        load_config(),
+                        profile_name=rec.profile_name,
+                        tempo_scale=rec.tempo_scale,
+                        fps=inp.fps,
+                        input_lead_us=rec.input_lead_us,
+                    )
+                    state.current_profile = canonical_profile_name(rec.profile_name)
+                    state.current_tempo = rec.tempo_scale
+                    state.current_fps = inp.fps if inp.fps > 0 else None
+                except Exception:
+                    pass
+            state.current_view = "picker"
         update_ui()
 
     @kb.add("escape")

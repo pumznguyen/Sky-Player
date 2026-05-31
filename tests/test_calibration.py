@@ -234,6 +234,30 @@ def test_calibrate_advisory_severe_jitter():
     assert rec.tempo_scale == 0.90
 
 
+def test_calibrate_advisory_dense_schedule_without_lateness():
+    from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
+
+    inp = CalibrationInput(
+        profile_name="balanced",
+        tempo_scale=1.0,
+        fps=60,
+        p95_lateness_us=1000,
+        p99_lateness_us=2500,
+        p95_send_duration_us=500,
+        late_over_10ms=0,
+        impossible_same_key_repeats=0,
+        risky_same_key_repeats=8,
+        failed_release_count=0,
+        compressed_holds=12,
+        max_polyphony=6,
+        note_count=100,
+    )
+    rec = calibrate_profile(inp)
+    assert rec.severity == "moderate"
+    assert rec.profile_name == "dense-safe"
+    assert rec.tempo_scale == 0.95
+
+
 def test_calibrate_hold_uses_frame_timing_policy():
     from sky_music.orchestration.calibration import CalibrationInput, calibrate_profile
 
@@ -269,3 +293,91 @@ def test_frame_timing_defaults_from_config(tmp_path, monkeypatch):
     assert cfg.frame_timing.min_hold_min_frame_ratio == 0.75
     assert cfg.frame_timing.repeat_release_gap_min_frame_ratio == 0.2
     assert cfg.frame_timing.min_visible_hold_frames == FrameTimingDefaults.min_visible_hold_frames
+
+
+def _write_summary(tmp_path: Path, data: dict, name: str = "playback_telemetry_test.summary.json") -> Path:
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(exist_ok=True)
+    summary_path = logs_dir / name
+    summary_path.write_text(
+        json.dumps(data),
+        encoding="utf-8",
+    )
+    return summary_path
+
+
+def test_apply_calibration_loads_latest_summary(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _write_summary(tmp_path, {
+        "profile": "balanced",
+        "tempo_scale": 1.0,
+        "fps": 60,
+        "lateness_us": {"p95_us": 1000, "p99_us": 2000, "over_10ms": 0},
+        "send_duration_us": {"p95_us": 500},
+        "backend": {"panic_release_failures": 0},
+        "schedule": {"impossible_same_key_repeats": 0, "risky_same_key_repeats": 0},
+    })
+
+    main.PLAYBACK_SESSION = None
+    assert main._apply_calibration_from_telemetry(AppConfig()) is True
+    assert main.PLAYBACK_SESSION is not None
+    assert main.TIMING_PROFILE_NAME == "local-precise@60fps"
+
+
+def test_save_calibration_persists_profile_tempo_fps_and_input_lead(tmp_path, monkeypatch):
+    from sky_music.config import load_config
+
+    config_file = tmp_path / "config.json"
+    monkeypatch.setattr("sky_music.config.CONFIG_PATH", config_file)
+    monkeypatch.chdir(tmp_path)
+    clear_config_cache()
+    _write_summary(tmp_path, {
+        "profile": "balanced",
+        "tempo_scale": 1.0,
+        "fps": 60,
+        "lateness_us": {"p95_us": 2000, "p99_us": 9000, "over_10ms": 0},
+        "send_duration_us": {"p95_us": 1000},
+        "backend": {"panic_release_failures": 0},
+        "schedule": {"impossible_same_key_repeats": 0, "risky_same_key_repeats": 0},
+    })
+
+    cfg = AppConfig()
+    assert main._apply_calibration_from_telemetry(cfg, persist=True) is True
+    saved = load_config(force_reload=True)
+    assert saved.default_timing_profile == "balanced"
+    assert saved.default_tempo_scale == 0.95
+    assert saved.game_fps == 60
+    assert saved.timing_profiles["balanced"]["input_lead_us"] >= 8_000
+    assert "@" not in saved.default_timing_profile
+
+
+def test_apply_calibration_uses_explicit_summary_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _write_summary(tmp_path, {
+        "profile": "balanced",
+        "tempo_scale": 1.0,
+        "fps": 60,
+        "lateness_us": {"p95_us": 1000, "p99_us": 2000, "over_10ms": 0},
+        "send_duration_us": {"p95_us": 500},
+        "backend": {"panic_release_failures": 0},
+        "schedule": {"impossible_same_key_repeats": 0, "risky_same_key_repeats": 0},
+    })
+    explicit = tmp_path / "chosen.summary.json"
+    explicit.write_text(
+        json.dumps({
+            "profile": "balanced",
+            "tempo_scale": 1.0,
+            "fps": 30,
+            "lateness_us": {"p95_us": 5000, "p99_us": 16000, "over_10ms": 10},
+            "send_duration_us": {"p95_us": 2000},
+            "backend": {"panic_release_failures": 0},
+            "schedule": {"impossible_same_key_repeats": 0, "risky_same_key_repeats": 0},
+        }),
+        encoding="utf-8",
+    )
+
+    main.PLAYBACK_SESSION = None
+    assert main._apply_calibration_from_telemetry(AppConfig(), summary_path=explicit) is True
+    assert main.PLAYBACK_SESSION is not None
+    assert main.PLAYBACK_SESSION.fps == 30
+    assert main.PLAYBACK_SESSION.profile_name == "remote-safe"

@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Literal
 
 @dataclass(frozen=True, slots=True)
@@ -13,6 +15,9 @@ class CalibrationInput:
     impossible_same_key_repeats: int
     risky_same_key_repeats: int
     failed_release_count: int
+    compressed_holds: int = 0
+    max_polyphony: int = 0
+    note_count: int = 0
 
 @dataclass(frozen=True, slots=True)
 class CalibrationRecommendation:
@@ -22,6 +27,36 @@ class CalibrationRecommendation:
     hold_us: int
     reason: str
     severity: Literal["ok", "moderate", "severe"]
+
+
+def _read_summary_file(path: Path) -> dict | None:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def load_latest_telemetry_summary(logs_dir: Path | str = Path("logs")) -> dict | None:
+    """Load the newest telemetry companion summary from a logs directory."""
+    path = Path(logs_dir)
+    summaries = sorted(path.glob("*.summary.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not summaries:
+        return None
+    return _read_summary_file(summaries[0])
+
+
+def load_telemetry_summary(target: Path | str | None = None) -> dict | None:
+    """Load a specific summary file, or the latest summary from a directory/logs."""
+    if target is None:
+        return load_latest_telemetry_summary()
+    path = Path(target)
+    if path.is_dir():
+        return load_latest_telemetry_summary(path)
+    if path.suffix == ".csv":
+        path = path.with_suffix(".summary.json")
+    return _read_summary_file(path)
 
 def calibrate_profile(inp: CalibrationInput) -> CalibrationRecommendation:
     """
@@ -50,17 +85,39 @@ def calibrate_profile(inp: CalibrationInput) -> CalibrationRecommendation:
     p99 = inp.p99_lateness_us
     late_10ms = inp.late_over_10ms
     
+    schedule_stress = (
+        inp.impossible_same_key_repeats > 0
+        or inp.risky_same_key_repeats > 5
+        or inp.compressed_holds > 10
+    )
+    dense_polyphony = inp.max_polyphony > 8
+    stress_rate = (
+        (inp.impossible_same_key_repeats + inp.risky_same_key_repeats) / inp.note_count
+        if inp.note_count > 0
+        else 0.0
+    )
+
     # 2. Timing Profile and Tempo Scale calibration decision tree
-    if inp.failed_release_count > 0 or inp.impossible_same_key_repeats > 5 or p99 > 15000 or late_10ms > 5:
+    if inp.failed_release_count > 0 or inp.impossible_same_key_repeats > 0 or p99 > 15000 or late_10ms > 5:
         severity = "severe"
-        rec_profile = "remote-safe" if inp.fps <= 30 else "dense-safe"
-        rec_tempo = round(inp.tempo_scale * 0.90, 2)
-        reason = f"Severe timing jitter detected (p99={p99/1000:.1f}ms, late >10ms count={late_10ms}). Recommend safe/dense playback and scaling down tempo."
-    elif p99 > 8000 or late_10ms > 0:
+        rec_profile = "remote-safe" if inp.fps <= 30 and not schedule_stress else "dense-safe"
+        rec_tempo = round(inp.tempo_scale * (0.88 if stress_rate > 0.03 else 0.90), 2)
+        reason = (
+            f"Severe timing or schedule stress detected "
+            f"(p99={p99/1000:.1f}ms, late >10ms count={late_10ms}, "
+            f"impossible repeats={inp.impossible_same_key_repeats}). "
+            "Recommend safe/dense playback and scaling down tempo."
+        )
+    elif p99 > 8000 or late_10ms > 0 or schedule_stress or dense_polyphony:
         severity = "moderate"
-        rec_profile = "balanced"
+        rec_profile = "dense-safe" if schedule_stress else ("remote-safe" if dense_polyphony else "balanced")
         rec_tempo = round(inp.tempo_scale * 0.95, 2)
-        reason = f"Moderate timing latency detected (p99={p99/1000:.1f}ms). Recommend balanced profiles and slight tempo reduction."
+        reason = (
+            f"Moderate timing or density stress detected "
+            f"(p99={p99/1000:.1f}ms, risky repeats={inp.risky_same_key_repeats}, "
+            f"compressed holds={inp.compressed_holds}, max polyphony={inp.max_polyphony}). "
+            "Recommend a safer profile and slight tempo reduction."
+        )
     elif p99 < 3000:
         severity = "ok"
         rec_profile = "local-precise"
@@ -111,4 +168,7 @@ def calibration_input_from_summary(summary: dict) -> CalibrationInput:
         impossible_same_key_repeats=int(sched.get("impossible_same_key_repeats", 0)),
         risky_same_key_repeats=int(sched.get("risky_same_key_repeats", 0)),
         failed_release_count=int(backend.get("panic_release_failures", 0)),
+        compressed_holds=int(sched.get("compressed_holds", 0)),
+        max_polyphony=int(sched.get("max_polyphony", 0)),
+        note_count=int(sched.get("note_count", summary.get("total_events", 0))),
     )

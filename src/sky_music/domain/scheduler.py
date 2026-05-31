@@ -29,6 +29,7 @@ class ScheduledNoteDraft:
     source_time_us: int
     snapped_time_us: int
     shifted_time_us: int
+    down_time_us: int
     note_key: NoteKey
     scan_code: int
     source_index: int
@@ -95,6 +96,7 @@ def build_key_actions(
             source_time_us=source_time_us,
             snapped_time_us=source_time_us,
             shifted_time_us=source_time_us,
+            down_time_us=source_time_us,
             note_key=k,
             scan_code=sc,
             source_index=idx
@@ -132,32 +134,48 @@ def build_key_actions(
             source_time_us=draft.source_time_us,
             snapped_time_us=target_snapped_time,
             shifted_time_us=shifted_time_us,
+            down_time_us=shifted_time_us,
             note_key=draft.note_key,
             scan_code=draft.scan_code,
             source_index=draft.source_index
         ))
         
-    # 3. Sort merged_drafts chronologically by shifted_time_us
-    merged_drafts.sort(key=lambda d: d.shifted_time_us)
+    # 3. Apply optional frame alignment to the effective key-down timestamps.
+    # Same-key repeat constraints must use this final down time, not the pre-align time.
+    aligned_drafts = []
+    for draft in merged_drafts:
+        down_time_us = draft.shifted_time_us
+        if policy.frame_align == "down_only" and policy.frame_us > 0:
+            down_time_us = align_frame_down_us(down_time_us, policy.frame_us, policy.frame_align)
+        aligned_drafts.append(ScheduledNoteDraft(
+            source_time_us=draft.source_time_us,
+            snapped_time_us=draft.snapped_time_us,
+            shifted_time_us=draft.shifted_time_us,
+            down_time_us=down_time_us,
+            note_key=draft.note_key,
+            scan_code=draft.scan_code,
+            source_index=draft.source_index
+        ))
+
+    # 4. Sort merged_drafts chronologically by final key-down time
+    merged_drafts = sorted(aligned_drafts, key=lambda d: d.down_time_us)
     
-    # 4. Pre-calculate the next occurrence time of the same physical key
+    # 5. Pre-calculate the next occurrence time of the same physical key
     next_same_key_time = {}
     last_seen_by_key = {}
     for idx in range(len(merged_drafts) - 1, -1, -1):
         draft = merged_drafts[idx]
         next_same_key_time[draft.source_index] = last_seen_by_key.get(draft.scan_code)
-        last_seen_by_key[draft.scan_code] = (draft.shifted_time_us, draft.source_time_us)
+        last_seen_by_key[draft.scan_code] = (draft.down_time_us, draft.source_time_us)
         
     raw_events = [] # list of dicts: {"at_us": int, "sc": int, "kind": "down"|"up", "reason": str}
     diagnostics = []
     
-    # 5. Schedule down/up bounds for each individual note
+    # 6. Schedule down/up bounds for each individual note
     for draft in merged_drafts:
         next_same_info = next_same_key_time[draft.source_index]
         sc = draft.scan_code
-        shifted_us = draft.shifted_time_us
-        if policy.frame_align == "down_only" and policy.frame_us > 0:
-            shifted_us = align_frame_down_us(shifted_us, policy.frame_us, policy.frame_align)
+        shifted_us = draft.down_time_us
         orig_us = draft.source_time_us
         
         effective_delta_us = None

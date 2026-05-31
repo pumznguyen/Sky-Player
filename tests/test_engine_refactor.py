@@ -72,6 +72,39 @@ class TestExecutionResult:
         assert r.is_late is False
 
 
+def test_telemetry_summary_includes_schedule_metadata():
+    from sky_music.domain.scheduler_types import ScheduleMetadata, Microseconds
+    from sky_music.orchestration.telemetry import TelemetryLogger
+
+    logger = TelemetryLogger("test", enabled=True)
+    metadata = ScheduleMetadata(
+        actions=(),
+        source_duration_us=Microseconds(0),
+        playback_duration_us=Microseconds(0),
+        compressed_holds=2,
+        impossible_same_key_repeats=1,
+        risky_same_key_repeats=3,
+        max_polyphony=5,
+        note_count=20,
+    )
+    logger.record(
+        event_index=0,
+        kind="down",
+        scheduled_us=0,
+        actual_us=100,
+        lateness_us=100,
+        send_duration_us=10,
+        scan_codes=(0x15,),
+        reason="onset",
+    )
+    logger.record_schedule_metadata(metadata)
+    summary = logger.get_summary()
+    assert summary is not None
+    assert summary["schedule"]["compressed_holds"] == 2
+    assert summary["schedule"]["impossible_same_key_repeats"] == 1
+    assert summary["schedule"]["max_polyphony"] == 5
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PlaybackEngine.get_elapsed_us
 # ─────────────────────────────────────────────────────────────────────────────

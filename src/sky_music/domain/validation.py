@@ -107,7 +107,7 @@ def validate_key_actions(
                 if sc in last_up_us:
                     gap = action.at_us - last_up_us[sc]
                     if gap < policy.repeat_release_gap_us:
-                        severity = "fatal" if policy.same_key_conflict_policy in ("strict", "adaptive") else "warning"
+                        severity = "fatal" if policy.same_key_conflict_policy == "strict" else "warning"
                         violations.append(ScheduleInvariantViolation(
                             code="insufficient_release_gap",
                             message=f"Same-key repeat release gap for scan code {sc} is {gap}us, below required {policy.repeat_release_gap_us}us",
@@ -135,7 +135,7 @@ def validate_key_actions(
                     hold = action.at_us - down_at
                     min_req = policy.min_scheduled_hold_us
                     if hold < min_req:
-                        severity = "fatal" if policy.same_key_conflict_policy in ("strict", "adaptive") else "warning"
+                        severity = "fatal" if policy.same_key_conflict_policy == "strict" else "warning"
                         violations.append(ScheduleInvariantViolation(
                             code="insufficient_hold",
                             message=f"Hold duration for scan code {sc} is {hold}us, below required minimum {min_req}us",

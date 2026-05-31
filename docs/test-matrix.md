@@ -23,12 +23,12 @@ We maintain a suite of 24 automated tests verifying scheduler timing, parser sch
 | **`tests/test_scheduler_current_behavior.py`** | `test_single_note_creates_down_up` | Legacy float-scheduler down/up creation. | Asserts correct legacy key down/up times in seconds. |
 | | `test_chord_at_same_timestamp_coalesced` | Chord grouping logic in legacy scheduler. | Asserts grouping and scan code batching. |
 | | `test_same_key_repeat_compresses_hold` | Holds compression under dense schedules. | Asserts co-compresses down holds correctly. |
-| | `test_impossible_same_key_repeat_counted` | Too-fast legacy same-key repeats. | Asserts impossible repeat count diagnostics. |
+| | `test_impossible_same_key_repeat_counted` | Too-fast same-key repeats. | Asserts impossible repeat count diagnostics. |
 | **`tests/test_scheduler_new.py`** | `test_chord_batching_and_deduplication` | Deduplicates identical scan codes in chords. | Asserts only unique keys are batched together. |
 | | `test_same_key_repeat_releases_first` | Key release prioritizing for repeats. | Asserts microsecond repeat release precedes new down trigger. |
 | | `test_prioritization_at_same_timestamp` | Timeline order priority sorting. | Asserts repeat-up -> down -> down-up chronological order. |
 | | `test_impossible_same_key_repeat_diagnostics` | High-speed same-key repeats count. | Asserts fallback holdings apply (500us) cleanly. |
-| **`tests/test_calibration.py`** | `test_timing_profile_parsing` | Timing profile parameter parsing. | Asserts policy bounds match selected profile (balanced/fast/conservative). |
+| **`tests/test_calibration.py`** | `test_timing_profile_parsing` | Timing profile parameter parsing. | Asserts policy bounds match selected profile (balanced/local-precise/remote-safe/dense-safe). |
 | | `test_timing_overrides_parsing` | Parameter override precedence. | Asserts arguments take higher priority over profiles. |
 | | `test_dry_run_simulation_flag` | Simulation mode activations checks. | Asserts globals configure correctly. |
 | **`tests/test_cli.py`** | `test_cli_basic_arguments` | Basic CLI argument configurations checks. | Asserts args are assigned correctly with fallback values. |

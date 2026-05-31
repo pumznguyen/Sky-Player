@@ -55,3 +55,13 @@ def test_cli_doctor_flags():
     assert args.doctor_timing is True
     args = parser.parse_args(["--doctor-input"])
     assert args.doctor_input is True
+
+def test_cli_save_calibration_argument():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--save-calibration"])
+    assert args.save_calibration is True
+
+def test_cli_calibration_summary_argument():
+    parser = main.build_arg_parser()
+    args = parser.parse_args(["--calibration-summary", "logs/run.summary.json"])
+    assert args.calibration_summary == Path("logs/run.summary.json")

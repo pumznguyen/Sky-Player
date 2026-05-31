@@ -232,6 +232,32 @@ def test_down_only_frame_align_snaps_key_down():
     assert down.at_us == 999_990
 
 
+def test_frame_align_same_key_repeat_uses_aligned_next_down():
+    song = Song(
+        name="Aligned Repeat",
+        notes=(
+            Note(time_ms=Millis(1000), key=NoteKey("Key0")),
+            Note(time_ms=Millis(1010), key=NoteKey("Key0")),
+        ),
+    )
+    policy = FrameTimingPolicy.from_timing_policy(
+        TimingPolicy.from_dict({
+            "hold_us": 2_000,
+            "min_hold_us": 1_000,
+            "repeat_release_gap_us": 1_000,
+            "input_lead_us": 0,
+        }),
+        fps=30,
+        min_visible_hold_frames=0,
+        min_hold_min_frame_ratio=0,
+        repeat_release_gap_min_frame_ratio=0,
+        frame_align="down_only",
+        same_key_conflict_policy="strict",
+    )
+    with pytest.raises(ScheduleBuildError):
+        build_key_actions(song, policy=policy)
+
+
 def test_none_frame_align_preserves_exact_down_time():
     song = Song(
         name="Exact",

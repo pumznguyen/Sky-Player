@@ -181,22 +181,12 @@ _PROFILE_KEY_TO_CLI: dict[str, str] = {
     "dense_safe": "dense-safe",
 }
 
-_LEGACY_PROFILE_KEYS: dict[str, str] = {
-    "balanced_120fps": "balanced",
-    "low_fps_30": "balanced",
-    "fast": "balanced",
-    "conservative": "balanced",
-}
-
-
 def canonical_profile_name(name: str) -> str:
     """Normalize a profile name to picker/CLI form (hyphens, no @fps suffix)."""
     base = name.split("@", 1)[0].strip()
     key = normalize_profile_name(base)
     if key in _PROFILE_KEY_TO_CLI:
         return _PROFILE_KEY_TO_CLI[key]
-    if key in _LEGACY_PROFILE_KEYS:
-        return _LEGACY_PROFILE_KEYS[key]
     return "balanced"
 
 
@@ -233,6 +223,67 @@ def spin_threshold_for_profile(cfg: AppConfig, profile_name: str) -> int:
 def sky_process_names_csv(cfg: AppConfig | None = None) -> str:
     names = (cfg or AppConfig()).sky_process_names
     return ",".join(names)
+
+
+def normalize_fps_value(fps: int | None) -> int:
+    """Return the persisted FPS value; 0 means frame-aware scaling is disabled."""
+    return int(fps) if fps is not None and int(fps) > 0 else 0
+
+
+def persist_default_profile(cfg: AppConfig, profile_name: str) -> None:
+    cfg.default_timing_profile = canonical_profile_name(profile_name)
+    save_config(cfg)
+
+
+def persist_default_tempo(cfg: AppConfig, tempo_scale: float) -> None:
+    if tempo_scale <= 0:
+        raise ValueError("tempo_scale must be > 0")
+    cfg.default_tempo_scale = float(tempo_scale)
+    save_config(cfg)
+
+
+def persist_default_fps(cfg: AppConfig, fps: int | None) -> None:
+    cfg.game_fps = normalize_fps_value(fps)
+    save_config(cfg)
+
+
+def persist_playback_defaults(
+    cfg: AppConfig,
+    *,
+    profile_name: str,
+    tempo_scale: float,
+    fps: int | None,
+) -> None:
+    if tempo_scale <= 0:
+        raise ValueError("tempo_scale must be > 0")
+    cfg.default_timing_profile = canonical_profile_name(profile_name)
+    cfg.default_tempo_scale = float(tempo_scale)
+    cfg.game_fps = normalize_fps_value(fps)
+    save_config(cfg)
+
+
+def persist_calibration_defaults(
+    cfg: AppConfig,
+    *,
+    profile_name: str,
+    tempo_scale: float,
+    fps: int,
+    input_lead_us: int,
+) -> None:
+    """Persist calibration without storing already frame-scaled hold values."""
+    if tempo_scale <= 0:
+        raise ValueError("tempo_scale must be > 0")
+    canonical = canonical_profile_name(profile_name)
+    profile_key = normalize_profile_name(canonical)
+    base_profile = dict(DEFAULT_TIMING_PROFILES.get(profile_key, DEFAULT_TIMING_PROFILES["balanced"]))
+    base_profile.update(cfg.timing_profiles.get(profile_key, {}))
+    base_profile["input_lead_us"] = int(input_lead_us)
+
+    cfg.default_timing_profile = canonical
+    cfg.default_tempo_scale = float(tempo_scale)
+    cfg.game_fps = normalize_fps_value(fps)
+    cfg.timing_profiles[profile_key] = base_profile
+    save_config(cfg)
 
 
 def argparse_base_defaults() -> dict[str, Any]:

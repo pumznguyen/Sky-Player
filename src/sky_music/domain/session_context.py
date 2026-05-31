@@ -21,7 +21,7 @@ from sky_music.infrastructure.timing import SleepPolicy
 if TYPE_CHECKING:
     from sky_music.orchestration.calibration import CalibrationRecommendation
 
-ConflictPolicy = Literal["degraded", "strict", "adaptive"]
+ConflictPolicy = Literal["degraded", "strict"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,8 +44,18 @@ class PlaybackSessionContext:
             object.__setattr__(self, "fps", None)
 
     @classmethod
-    def balanced(cls, tempo_scale: float = 1.0, fps: int | None = None) -> PlaybackSessionContext:
-        return cls(profile_name="balanced", tempo_scale=tempo_scale, fps=fps)
+    def balanced(
+        cls,
+        tempo_scale: float = 1.0,
+        fps: int | None = None,
+        scan_code_mode: str = "physical",
+    ) -> PlaybackSessionContext:
+        return cls(
+            profile_name="balanced",
+            tempo_scale=tempo_scale,
+            fps=fps,
+            scan_code_mode=scan_code_mode,
+        )
 
     @classmethod
     def from_cli_args(cls, args: Any, cfg: AppConfig | None = None) -> PlaybackSessionContext:

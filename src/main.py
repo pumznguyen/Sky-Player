@@ -9,10 +9,12 @@ from sky_music.platform.win32 import inputs
 from sky_music.config import (
     load_config,
     apply_config_defaults,
-    save_config,
     HotkeyDefaults,
     AppConfig,
     merged_timing_profiles,
+    persist_calibration_defaults,
+    persist_default_profile,
+    persist_playback_defaults,
     spin_threshold_for_profile,
     sky_process_names_csv,
     canonical_profile_name,
@@ -147,8 +149,7 @@ def _handle_risk_analysis(report, song, is_dry_run: bool, controls, policy_overr
         # Cross-session persistence for risk-based profile change
         try:
             user_cfg = load_config()
-            user_cfg.default_timing_profile = canonical_profile_name(recommended)
-            save_config(user_cfg)
+            persist_default_profile(user_cfg, recommended)
         except Exception:
             pass
         return True, recommended, None
@@ -406,23 +407,13 @@ def _print_profile_comparison_table(cfg: AppConfig | None = None) -> None:
     print()
 
 
-def _load_latest_telemetry_summary() -> dict | None:
-    import json
-    from pathlib import Path
-
-    logs_dir = Path("logs")
-    summaries = sorted(logs_dir.glob("*.summary.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not summaries:
-        return None
-    try:
-        with summaries[0].open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
-def _apply_calibration_from_telemetry(cfg: AppConfig) -> bool:
-    """Apply the latest telemetry calibration recommendation to the in-memory session."""
+def _apply_calibration_from_telemetry(
+    cfg: AppConfig,
+    *,
+    persist: bool = False,
+    summary_path: Path | str | None = None,
+) -> bool:
+    """Apply the latest telemetry calibration recommendation to the session, optionally saving it."""
     global PLAYBACK_SESSION, TIMING_POLICY, SLEEP_POLICY, TIMING_PROFILE_NAME, TEMPO_SCALE
 
     ANSI_RESET  = "\033[0m"
@@ -431,13 +422,20 @@ def _apply_calibration_from_telemetry(cfg: AppConfig) -> bool:
     ANSI_YELLOW = "\033[33m"
     ANSI_GREEN  = "\033[32m"
     ANSI_DIM    = "\033[2m"
+
+    from sky_music.orchestration.calibration import (
+        calibrate_profile,
+        calibration_input_from_summary,
+        load_telemetry_summary,
+    )
+
+    summary = load_telemetry_summary(summary_path)
     if summary is None:
-        print(f"\n  {ANSI_YELLOW}No telemetry summary files found in logs/.{ANSI_RESET}")
+        target = summary_path if summary_path is not None else "logs/"
+        print(f"\n  {ANSI_YELLOW}No telemetry summary found at {target}.{ANSI_RESET}")
         print("  Run a playback with --debug-csv first to generate telemetry.")
         print()
         return False
-
-    from sky_music.orchestration.calibration import calibrate_profile, calibration_input_from_summary
 
     inp = calibration_input_from_summary(summary)
     rec = calibrate_profile(inp)
@@ -446,11 +444,13 @@ def _apply_calibration_from_telemetry(cfg: AppConfig) -> bool:
         fps=cfg.game_fps if cfg.game_fps > 0 else None,
     )
     updated = apply_recommendation_to_context(base, rec)
-    PLAYBACK_SESSION = updated
-    TIMING_POLICY = updated.resolve_effective_policy(cfg)
-    SLEEP_POLICY = updated.resolve_sleep_policy(cfg)
-    TIMING_PROFILE_NAME = updated.display_profile_label()
-    TEMPO_SCALE = updated.tempo_scale
+    if inp.fps > 0:
+        updated = updated.with_fps(inp.fps)
+    RUNTIME_STATE.apply_session(updated, cfg)
+    RUNTIME_STATE.telemetry_csv_enabled = TELEMETRY_CSV_ENABLED
+    RUNTIME_STATE.dry_run = DRY_RUN_MODE
+    RUNTIME_STATE.verbose_hud = VERBOSE_HUD
+    _sync_legacy_runtime_globals()
 
     print()
     print(f"  {ANSI_BOLD}{ANSI_CYAN}Applied calibration to session{ANSI_RESET}")
@@ -460,52 +460,64 @@ def _apply_calibration_from_telemetry(cfg: AppConfig) -> bool:
     print(f"    Hold target : {rec.hold_us / 1000:.1f} ms ({ANSI_DIM}via FrameTimingPolicy{ANSI_RESET})")
     print(f"    Severity    : {rec.severity.upper()}")
     print(f"    Reason      : {rec.reason}")
-    print(f"  {ANSI_GREEN}In-memory only — config.json not modified.{ANSI_RESET}")
+    if persist:
+        persist_calibration_defaults(
+            cfg,
+            profile_name=rec.profile_name,
+            tempo_scale=rec.tempo_scale,
+            fps=inp.fps,
+            input_lead_us=rec.input_lead_us,
+        )
+        print(f"  {ANSI_GREEN}Saved calibration defaults to config.json.{ANSI_RESET}")
+    else:
+        print(f"  {ANSI_GREEN}In-memory only — config.json not modified.{ANSI_RESET}")
     print()
     return True
 
 
-def _run_auto_calibrate() -> None:
+def _run_auto_calibrate(summary_path: Path | str | None = None) -> None:
     """Read the most recent telemetry summary and print calibration recommendations."""
-    import glob, json
-    from pathlib import Path
-
     ANSI_RESET  = "\033[0m"
     ANSI_BOLD   = "\033[1m"
     ANSI_CYAN   = "\033[36m"
     ANSI_YELLOW = "\033[33m"
-    ANSI_GREEN  = "\033[32m"
 
-    logs_dir = Path("logs")
-    summaries = sorted(logs_dir.glob("*.summary.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    if not summaries:
-        print(f"\n  {ANSI_YELLOW}No telemetry summary files found in logs/.{ANSI_RESET}")
-        print(  "  Run a playback with --debug-csv first to generate telemetry.")
-        print()
-        return
+    from sky_music.orchestration.calibration import (
+        calibrate_profile,
+        calibration_input_from_summary,
+        load_telemetry_summary,
+    )
 
-    latest = summaries[0]
-    try:
-        with latest.open("r", encoding="utf-8") as f:
-            summary = json.load(f)
-    except Exception as e:
-        print(f"\n  Failed to read {latest}: {e}")
+    summary = load_telemetry_summary(summary_path)
+    if summary is None:
+        target = summary_path if summary_path is not None else "logs/"
+        print(f"\n  {ANSI_YELLOW}No telemetry summary found at {target}.{ANSI_RESET}")
+        print("  Run a playback with --debug-csv first to generate telemetry.")
         return
 
     print()
-    print(f"  {ANSI_BOLD}{ANSI_CYAN}Auto-Calibrate — analysing: {latest.name}{ANSI_RESET}")
+    label = str(summary_path) if summary_path is not None else "latest telemetry"
+    print(f"  {ANSI_BOLD}{ANSI_CYAN}Auto-Calibrate — analysing: {label}{ANSI_RESET}")
     print()
 
-    try:
-        from sky_music.orchestration.telemetry import inspect_telemetry_report
-        inspect_telemetry_report(str(latest), recommend=True)
-    except Exception as e:
-        # Fallback: print raw summary fields if calibration module fails
-        lat = summary.get("lateness_us", {})
-        print(f"  p99 lateness : {lat.get('p99_us', 0) / 1000:.1f} ms")
-        print(f"  late >10 ms  : {lat.get('over_10ms', 0)}")
-        print(f"  Profile used : {summary.get('profile', 'unknown')}")
-        print(f"  [calibration engine error: {e}]")
+    inp = calibration_input_from_summary(summary)
+    rec = calibrate_profile(inp)
+    lat = summary.get("lateness_us", {})
+    dur = summary.get("send_duration_us", {})
+    print(f"  Song          : {summary.get('song', 'unknown')}")
+    print(f"  Profile used  : {inp.profile_name}")
+    print(f"  FPS           : {inp.fps}")
+    print(f"  p95 lateness  : {lat.get('p95_us', 0) / 1000:.1f} ms")
+    print(f"  p99 lateness  : {lat.get('p99_us', 0) / 1000:.1f} ms")
+    print(f"  p95 send      : {dur.get('p95_us', 0) / 1000:.1f} ms")
+    print()
+    print("  Calibration Recommendation:")
+    print(f"    Suggested Profile : {rec.profile_name}")
+    print(f"    Suggested Tempo   : {rec.tempo_scale:.2f}x")
+    print(f"    Input Lead        : {rec.input_lead_us / 1000:.1f} ms")
+    print(f"    Hold Target       : {rec.hold_us / 1000:.1f} ms")
+    print(f"    Severity          : {rec.severity.upper()}")
+    print(f"    Reason            : {rec.reason}")
     print()
     print()
 
@@ -516,6 +528,46 @@ class PlaybackOverrides:
     profile: str | None = None
     tempo: float | None = None
     fps: int | None = None
+
+
+@dataclass
+class RuntimeSessionState:
+    session: PlaybackSessionContext | None = None
+    timing_policy: object | None = None
+    sleep_policy: object | None = None
+    scan_code_mode: str = "physical"
+    telemetry_csv_enabled: bool = False
+    dry_run: bool = False
+    tempo_scale: float = 1.0
+    timing_profile_name: str = "balanced"
+    verbose_hud: bool = False
+
+    def apply_session(self, session: PlaybackSessionContext, cfg: AppConfig, *, spin_threshold_us: int | None = None) -> None:
+        self.session = session
+        self.timing_policy = session.resolve_effective_policy(cfg)
+        self.sleep_policy = session.resolve_sleep_policy(cfg, spin_threshold_us=spin_threshold_us)
+        self.scan_code_mode = session.scan_code_mode
+        self.tempo_scale = session.tempo_scale
+        self.timing_profile_name = session.display_profile_label()
+
+
+RUNTIME_STATE = RuntimeSessionState()
+
+
+def _sync_legacy_runtime_globals() -> None:
+    """Keep historical module globals in sync while runtime state is centralized."""
+    global CURRENT_SCAN_CODE_MODE, TIMING_POLICY, SLEEP_POLICY, PLAYBACK_SESSION
+    global TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
+
+    CURRENT_SCAN_CODE_MODE = RUNTIME_STATE.scan_code_mode
+    TIMING_POLICY = RUNTIME_STATE.timing_policy
+    SLEEP_POLICY = RUNTIME_STATE.sleep_policy
+    PLAYBACK_SESSION = RUNTIME_STATE.session
+    TELEMETRY_CSV_ENABLED = RUNTIME_STATE.telemetry_csv_enabled
+    DRY_RUN_MODE = RUNTIME_STATE.dry_run
+    TEMPO_SCALE = RUNTIME_STATE.tempo_scale
+    TIMING_PROFILE_NAME = RUNTIME_STATE.timing_profile_name
+    VERBOSE_HUD = RUNTIME_STATE.verbose_hud
 
 def play_selected_song(
     selected_song: Path,
@@ -543,9 +595,10 @@ def play_selected_song(
     if force_profile is not None:
         force_profile = canonical_profile_name(force_profile)
 
+    user_cfg = load_config()
     base_session = PLAYBACK_SESSION or PlaybackSessionContext.balanced(
         tempo_scale=TEMPO_SCALE,
-        fps=None,
+        fps=user_cfg.game_fps if user_cfg.game_fps > 0 else None,
         scan_code_mode=CURRENT_SCAN_CODE_MODE,
     )
     session = merge_session_with_overrides(
@@ -559,7 +612,6 @@ def play_selected_song(
     current_profile = session.display_profile_label()
     current_tempo = session.tempo_scale
 
-    user_cfg = load_config()
     active_policy = session.resolve_effective_policy(user_cfg)
     active_sleep_policy = session.resolve_sleep_policy(user_cfg)
 
@@ -717,6 +769,7 @@ def play_selected_song(
         focus_restore_grace_us=active_policy.focus_restore_grace_us,
         fps=getattr(active_policy, "fps", None)
     )
+    engine.telemetry.record_schedule_metadata(sched_meta)
     result = engine.play()
     clear_terminal()
     return result
@@ -955,11 +1008,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     telem.add_argument(
+        "--calibration-summary",
+        type=Path,
+        help=(
+            "specific telemetry .summary.json, .csv, or logs directory to use for "
+            "--auto-calibrate, --apply-calibration, and --save-calibration"
+        ),
+    )
+    telem.add_argument(
         "--apply-calibration",
         action="store_true",
         help=(
             "apply calibration recommendations from the latest telemetry summary to the "
             "in-memory playback session (does not save config.json)."
+        ),
+    )
+    telem.add_argument(
+        "--save-calibration",
+        action="store_true",
+        help=(
+            "apply calibration recommendations from the latest telemetry summary and "
+            "persist profile, tempo, FPS, and input lead defaults to config.json."
         ),
     )
 
@@ -985,33 +1054,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 def configure_from_args(args: argparse.Namespace, cfg: AppConfig | None = None) -> None:
-    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, SLEEP_POLICY, PLAYBACK_SESSION
-    global TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
+    global PLAYBACK_DEBUG, DEBUG_LOG_PATH
     from sky_music.platform.win32 import inputs
     from sky_music.ui import picker as songs
 
     cfg = cfg or load_config()
 
-    CURRENT_SCAN_CODE_MODE = args.scan_code_mode
     songs.SONG_DIR = args.songs_dir
     PLAYBACK_DEBUG = args.debug_playback
     inputs.PLAYBACK_DEBUG = args.debug_playback
-    TELEMETRY_CSV_ENABLED = args.debug_csv
-    DRY_RUN_MODE = args.dry_run
-    TEMPO_SCALE = args.tempo_scale
-    if TEMPO_SCALE <= 0:
+    RUNTIME_STATE.telemetry_csv_enabled = args.debug_csv
+    RUNTIME_STATE.dry_run = args.dry_run
+    RUNTIME_STATE.tempo_scale = args.tempo_scale
+    RUNTIME_STATE.scan_code_mode = args.scan_code_mode
+    if RUNTIME_STATE.tempo_scale <= 0:
         raise ValueError("tempo_scale must be > 0")
-    VERBOSE_HUD = args.verbose_hud
+    RUNTIME_STATE.verbose_hud = args.verbose_hud
 
     if PLAYBACK_DEBUG:
         init_debug_log()
 
     session = PlaybackSessionContext.from_cli_args(args, cfg)
     spin_override = getattr(args, "spin_threshold_us", None)
-    PLAYBACK_SESSION = session
-    TIMING_POLICY = session.resolve_effective_policy(cfg)
-    SLEEP_POLICY = session.resolve_sleep_policy(cfg, spin_threshold_us=spin_override)
-    TIMING_PROFILE_NAME = session.display_profile_label()
+    RUNTIME_STATE.apply_session(session, cfg, spin_threshold_us=spin_override)
+    _sync_legacy_runtime_globals()
 
     if args.sky_process_names:
         inputs.EXPECTED_PROCESS_NAMES = {
@@ -1124,7 +1190,6 @@ def print_choices_local(song_choices: list[Path]) -> None:
         print(f"  {index:>2}) {path.stem}")
 
 def main() -> int:
-    global TIMING_PROFILE_NAME, TEMPO_SCALE, DRY_RUN_MODE, PLAYBACK_SESSION, TIMING_POLICY, SLEEP_POLICY
     if sys.platform == 'win32':
         try:
             sys.stdout.reconfigure(encoding='utf-8')
@@ -1152,12 +1217,16 @@ def main() -> int:
         _print_profile_comparison_table(user_cfg)
         return 0
 
-    if getattr(args, "apply_calibration", False):
-        if not _apply_calibration_from_telemetry(user_cfg):
+    if getattr(args, "apply_calibration", False) or getattr(args, "save_calibration", False):
+        if not _apply_calibration_from_telemetry(
+            user_cfg,
+            persist=bool(getattr(args, "save_calibration", False)),
+            summary_path=getattr(args, "calibration_summary", None),
+        ):
             return 1
 
     if getattr(args, "auto_calibrate", False):
-        _run_auto_calibrate()
+        _run_auto_calibrate(getattr(args, "calibration_summary", None))
         return 0
 
     if args.doctor or args.doctor_timing or args.doctor_input:
@@ -1249,26 +1318,25 @@ def main() -> int:
             
             # P0 Fix: Update persistent loop state with picker decision
             # (Allows picker changes to persist across multiple songs)
-            PLAYBACK_SESSION = merge_session_with_overrides(
-                PLAYBACK_SESSION or PlaybackSessionContext.balanced(
-                    tempo_scale=TEMPO_SCALE,
-                    scan_code_mode=CURRENT_SCAN_CODE_MODE,
+            updated_session = merge_session_with_overrides(
+                RUNTIME_STATE.session or PLAYBACK_SESSION or PlaybackSessionContext.balanced(
+                    tempo_scale=RUNTIME_STATE.tempo_scale,
+                    scan_code_mode=RUNTIME_STATE.scan_code_mode,
                 ),
                 profile=picker_result.profile_name,
                 tempo=picker_result.tempo_scale,
                 fps=picker_result.fps,
             )
-            TIMING_PROFILE_NAME = PLAYBACK_SESSION.display_profile_label()
-            TEMPO_SCALE = PLAYBACK_SESSION.tempo_scale
-            DRY_RUN_MODE = (picker_result.action == "dry_run")
-            TIMING_POLICY = PLAYBACK_SESSION.resolve_effective_policy(user_cfg)
-            SLEEP_POLICY = PLAYBACK_SESSION.resolve_sleep_policy(user_cfg)
+            RUNTIME_STATE.apply_session(updated_session, user_cfg)
+            RUNTIME_STATE.dry_run = (picker_result.action == "dry_run")
+            _sync_legacy_runtime_globals()
 
-            user_cfg.default_timing_profile = PLAYBACK_SESSION.profile_name
-            user_cfg.default_tempo_scale = TEMPO_SCALE
-            if picker_result.fps is not None:
-                user_cfg.game_fps = picker_result.fps
-            save_config(user_cfg)
+            persist_playback_defaults(
+                user_cfg,
+                profile_name=updated_session.profile_name,
+                tempo_scale=updated_session.tempo_scale,
+                fps=picker_result.fps,
+            )
 
             if result == PLAYBACK_SKIPPED:
                 time.sleep(0.5)
