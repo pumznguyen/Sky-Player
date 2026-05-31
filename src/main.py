@@ -4,32 +4,29 @@ import time
 from pathlib import Path
 
 # Import từ các mô-đun chuyên biệt
-import inputs
-from sky_music.config import load_config, save_config, apply_config_defaults
-from inputs import (
+from sky_music.platform.win32 import inputs
+from sky_music.config import load_config, apply_config_defaults
+from sky_music.platform.win32.inputs import (
     enable_high_precision_timers,
-    disable_high_precision_timers,
-    focusWindow
+    disable_high_precision_timers
 )
-from ui import (
-    PLAYBACK_FINISHED,
+from sky_music.ui.hud import (
     PLAYBACK_SKIPPED,
     PLAYBACK_QUIT,
-    PLAYBACK_POLL_SECONDS,
-    PlaybackControls,
     ProgressRenderer,
-    clear_terminal,
+    clear_terminal
+)
+from sky_music.infrastructure.hotkeys import (
+    PlaybackControls,
     parse_hotkey,
     hotkey_conflicts_with_note_keys
 )
-from songs import (
+from sky_music.ui.picker import (
     SONG_DIR,
     SUPPORTED_EXTENSIONS,
     get_song_choices,
     resolve_song_selection,
     countdown_before_playback,
-    ensure_sky_ready,
-    SongPickerResult,
 )
 
 PLAYBACK_DEBUG = False
@@ -38,6 +35,7 @@ DEBUG_LOG_PATH = None
 DEBUG_START_PERF = None
 DEBUG_LOG_BUFFER = []
 TIMING_POLICY = None
+SLEEP_POLICY = None
 TELEMETRY_CSV_ENABLED = False
 DRY_RUN_MODE = False
 TEMPO_SCALE = 1.0
@@ -93,7 +91,7 @@ def _handle_risk_analysis(report, song, is_dry_run: bool, controls, policy_overr
 
     Returns (should_continue, new_profile_name_or_None, new_tempo_scale_or_None).
     """
-    from sky_music.analyzer import ScheduleRiskReport  # type: ignore[attr-defined]
+
     severity = report.severity.upper()
     recommended = _recommended_profile(
         report.severity,
@@ -142,25 +140,75 @@ def _handle_risk_analysis(report, song, is_dry_run: bool, controls, policy_overr
         return True, None, None
 
 
-def _mini_preflight(is_dry_run: bool) -> bool:
-    """Preflight check before real playback — uniform box-style output."""
+def _mini_preflight(is_dry_run: bool, profile: str = "balanced", tempo: float = 1.0, controls = None) -> bool:
+    """Preflight check before real playback — uniform premium TUI panel output."""
     if is_dry_run:
         return True
 
-    import sky_music.doctor as doctor
+    import sky_music.infrastructure.doctor as doctor
     checks: list[tuple[bool, str]] = []
+
+    # Constants for ANSI styling
+    ANSI_RESET = "\033[0m"
+    ANSI_BOLD = "\033[1m"
+    ANSI_CYAN = "\033[36m"
+    ANSI_GREEN = "\033[32m"
+    ANSI_RED = "\033[31m"
+    ANSI_YELLOW = "\033[33m"
+    
+    # Standardize width dynamic determination with songs.py and ui.py
+    import shutil
+    terminal_width = shutil.get_terminal_size((80, 24)).columns
+    width = max(60, min(80, terminal_width))
+
+    def pad_line(content: str, w: int) -> str:
+        import re
+        clean = re.sub(r'\033\[[0-9;]*m', '', content)
+        cur_len = len(clean)
+        if cur_len < w:
+            return content + " " * (w - cur_len)
+        return content
+
+    def print_ansi_box(title: str, lines: list[str], border_color: str = ANSI_CYAN) -> None:
+        top_left = "╭"
+        top_right = "╮"
+        bottom_left = "╰"
+        bottom_right = "╯"
+        horiz = "─"
+        vert = "│"
+        
+        title_part = f"{horiz} {title} "
+        top_line = f"{border_color}{top_left}{title_part}{horiz * (width - len(title_part) - 2)}{top_right}{ANSI_RESET}"
+        bottom_line = f"{border_color}{bottom_left}{horiz * (width - 2)}{bottom_right}{ANSI_RESET}"
+        
+        print(top_line)
+        for line in lines:
+            padded = pad_line(line, width - 4)
+            print(f"{border_color}{vert}{ANSI_RESET} {padded} {border_color}{vert}{ANSI_RESET}")
+        print(bottom_line)
 
     # 1. Sky window
     win = doctor.check_sky_window()
     checks.append((win["ok"], "Sky window detected" if win["ok"] else f"Sky not found: {win['msg']}"))
+    
     if not win["ok"]:
-        print()
-        print("  ╭─ Readiness ────────────────────────────────────────────────")
-        print(f"  │  ✗ Sky not found: {win['msg']}")
-        print(  "  ╰" + "─" * 56)
         while True:
+            dry_str = "ON" if is_dry_run else "OFF"
+            header_line = f"Readiness │ profile {ANSI_CYAN}{profile}{ANSI_RESET} │ tempo {ANSI_CYAN}{tempo:.2f}x{ANSI_RESET} │ dry {ANSI_CYAN}{dry_str}{ANSI_RESET}"
+            col1 = f"{ANSI_RED}✗{ANSI_RESET} Sky not found: {win['msg']}"
+            status_line = f"{ANSI_YELLOW}Waiting for Sky focus. Playback has not started yet.{ANSI_RESET}"
+            controls_line = f"{ANSI_BOLD}R{ANSI_RESET} retry │ {ANSI_BOLD}D{ANSI_RESET} dry-run │ {ANSI_BOLD}Enter{ANSI_RESET} cancel"
+            
+            print()
+            print_ansi_box("SKY MUSIC HELPER", [header_line], border_color=ANSI_CYAN)
+            print()
+            print_ansi_box("Checks", [col1], border_color=ANSI_CYAN)
+            print()
+            print_ansi_box("Status", [status_line, controls_line], border_color=ANSI_YELLOW)
+            print()
+            
             try:
-                choice = input("  Sky not found. [R] retry  [D] dry-run  [Enter] cancel: ").strip().casefold()
+                choice = input("  Choice: ").strip().casefold()
             except (EOFError, KeyboardInterrupt):
                 return False
             if choice == "r":
@@ -168,39 +216,112 @@ def _mini_preflight(is_dry_run: bool) -> bool:
                 if win["ok"]:
                     checks[0] = (True, "Sky window detected")
                     break
-                print(f"  ✗ Still not found: {win['msg']}")
             elif choice == "d":
                 print("  → Use --dry-run to simulate without Sky.")
                 return False
             else:
                 return False
 
-    # 2. Focus
-    import inputs as _inputs
+    # 2. Focus strict validation & wait delay
+    from sky_music.platform.win32 import inputs as _inputs
     _inputs.focusWindow()
-    checks.append((True, "Focus requested"))
+    import time
+    time.sleep(0.25)
+    
+    focus_ok = _inputs.is_sky_active()
+    if not focus_ok:
+        while True:
+            dry_str = "ON" if is_dry_run else "OFF"
+            header_line = f"Readiness │ profile {ANSI_CYAN}{profile}{ANSI_RESET} │ tempo {ANSI_CYAN}{tempo:.2f}x{ANSI_RESET} │ dry {ANSI_CYAN}{dry_str}{ANSI_RESET}"
+            
+            check_lines = []
+            for ok, msg in checks:
+                icon = "✓" if ok else "✗"
+                color = ANSI_GREEN if ok else ANSI_RED
+                check_lines.append(f"{color}{icon}{ANSI_RESET} {msg}")
+            
+            col1 = f"{ANSI_RED}✗{ANSI_RESET} Focus failed"
+            status_line = f"{ANSI_YELLOW}Waiting for Sky focus. Playback has not started yet.{ANSI_RESET}"
+            controls_line = f"{ANSI_BOLD}R{ANSI_RESET} retry │ {ANSI_BOLD}D{ANSI_RESET} dry-run │ {ANSI_BOLD}Enter{ANSI_RESET} cancel"
+            
+            print()
+            print_ansi_box("SKY MUSIC HELPER", [header_line], border_color=ANSI_CYAN)
+            print()
+            print_ansi_box("Checks", check_lines + [col1], border_color=ANSI_CYAN)
+            print()
+            print_ansi_box("Status", [status_line, controls_line], border_color=ANSI_YELLOW)
+            print()
+            
+            try:
+                choice = input("  Choice: ").strip().casefold()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            if choice == "r":
+                _inputs.focusWindow()
+                time.sleep(0.25)
+                if _inputs.is_sky_active():
+                    break
+            elif choice == "d":
+                print("  → Use --dry-run to simulate without Sky.")
+                return False
+            else:
+                return False
+                
+    checks.append((True, "Focus confirmed"))
 
     # 3. Timer
     timer = doctor.check_timer_resolution()
-    checks.append((timer["ok"], "High-precision timers active" if timer["ok"] else timer["msg"]))
+    checks.append((timer["ok"], "Timer active" if timer["ok"] else timer["msg"]))
 
     # 4. Key conflicts
     keys = doctor.check_physical_keys_held()
     checks.append((keys["ok"], "No note keys held" if keys["ok"] else f"Keys held: {', '.join(keys.get('held_keys', []))}"))
 
-    # Render uniform box
-    print()
-    print("  ╭─ Readiness ────────────────────────────────────────────────")
-    row: list[str] = []
+    # Render gorgeous preflight panels!
+    dry_str = "ON" if is_dry_run else "OFF"
+    header_line = f"Readiness │ profile {ANSI_CYAN}{profile}{ANSI_RESET} │ tempo {ANSI_CYAN}{tempo:.2f}x{ANSI_RESET} │ dry {ANSI_CYAN}{dry_str}{ANSI_RESET}"
+    
+    row_parts = []
     for ok, msg in checks:
-        icon = "✓" if ok else "⚠"
-        row.append(f"{icon} {msg}")
-        if len(row) == 2:
-            print(f"  │  {row[0]:<28}  {row[1]}")
-            row = []
-    if row:
-        print(f"  │  {row[0]}")
-    print(  "  ╰" + "─" * 56)
+        icon = "✓" if ok else "✗"
+        color = ANSI_GREEN if ok else ANSI_RED
+        row_parts.append((ok, icon, color, msg))
+        
+    lines = []
+    for i in range(0, len(row_parts), 2):
+        part1 = row_parts[i]
+        col1 = f"{part1[2]}{part1[1]}{ANSI_RESET} {part1[3]}"
+        col1_len = 2 + len(part1[3])
+        col1_pad = col1 + " " * (34 - col1_len)
+        
+        if i + 1 < len(row_parts):
+            part2 = row_parts[i+1]
+            col2 = f"{part2[2]}{part2[1]}{ANSI_RESET} {part2[3]}"
+            col2_len = 2 + len(part2[3])
+            col2_pad = col2 + " " * (34 - col2_len)
+            lines.append(f"{col1_pad}   {col2_pad}")
+        else:
+            lines.append(col1_pad)
+
+    status_line1 = f"{ANSI_GREEN}Readiness checks passed. Starting playback...{ANSI_RESET}"
+    if controls is not None and controls.enabled:
+        ctrls_str = (
+            f"{ANSI_BOLD}{controls.pause.display}{ANSI_RESET} pause/resume │ "
+            f"{ANSI_BOLD}{controls.skip.display}{ANSI_RESET} skip │ "
+            f"{ANSI_BOLD}{controls.quit.display}{ANSI_RESET} quit │ "
+            f"{ANSI_BOLD}{controls.refocus.display}{ANSI_RESET} refocus │ "
+            f"{ANSI_BOLD}{controls.panic.display}{ANSI_RESET} panic"
+        )
+        status_lines = [status_line1, ctrls_str]
+    else:
+        status_lines = [status_line1]
+    
+    print()
+    print_ansi_box("SKY MUSIC HELPER", [header_line], border_color=ANSI_CYAN)
+    print()
+    print_ansi_box("Checks", lines, border_color=ANSI_CYAN)
+    print()
+    print_ansi_box("Status", status_lines, border_color=ANSI_GREEN)
     print()
     return True
 
@@ -230,34 +351,56 @@ def _print_post_run_report(engine, profile_name: str, tempo_scale: float) -> Non
     else:
         print( "  │  Backend: healthy (✓ no stuck keys)")
 
-    # Quality recommendation
+    # Advanced Calibration Recommendations based on Telemetry Feedback Loop
     p99 = lat.get("p99_us", 0)
+    p95_send = snd.get("p95_us", 0)
     over_10ms = lat.get("over_10ms", 0)
+    
     if failures or stuck:
         print( "  │  ⚠ Recommendation: Stuck keys detected — run --doctor before next playback.")
-    elif over_10ms > 5 or p99 > 15000:
-        print(f"  │  Recommendation: Latency high (p99={p99/1000:.1f}ms). Try --timing-profile dense-safe or lower tempo.")
-    elif over_10ms > 0 or p99 > 8000:
-        print(f"  │  Recommendation: Occasional late events (p99={p99/1000:.1f}ms). remote-safe or reduce --tempo-scale slightly.")
     else:
-        print( "  │  Timing quality: good ✓")
+        # Check high keyboard injection latency (UIPI / OS throttling)
+        if p95_send > 1500:
+            print(f"  │  ⚠ Warning: High input injection delay (p95_send={p95_send/1000:.1f}ms).")
+            print( "  │  Recommend: Run Sky Player as Administrator or close background overlays.")
+            
+        # Timing recommendations based on latency percentiles
+        if over_10ms > 5 or p99 > 15000:
+            print(f"  │  Recommendation: Severe latency jitter detected (p99={p99/1000:.1f}ms).")
+            print( "  │  Try: --timing-profile low_fps_30 or remote_safe, check CPU load.")
+        elif over_10ms > 0 or p99 > 8000:
+            print(f"  │  Recommendation: Moderate latency (p99={p99/1000:.1f}ms).")
+            print( "  │  Try: --timing-profile balanced_60fps, or reduce --tempo-scale slightly.")
+        elif p99 < 3000:
+            print(f"  │  Timing quality: excellent ✓ (p99={p99/1000:.1f}ms)")
+            print( "  │  Try: --timing-profile balanced_120fps or local_precise for higher timing accuracy.")
+        else:
+            print( "  │  Timing quality: good ✓")
+            
     print(  "  └" + "─" * 57)
     print()
 
+
+from dataclasses import dataclass
+
+@dataclass
+class PlaybackOverrides:
+    dry_run: bool = False
+    profile: str | None = None
+    tempo: float | None = None
+    fps: int | None = None
 
 def play_selected_song(
     selected_song: Path,
     countdown_seconds: int,
     controls: PlaybackControls | None = None,
-    force_dry_run: bool = False,
-    force_profile: str | None = None,
-    force_tempo: float | None = None,
+    overrides: PlaybackOverrides | None = None,
 ) -> str:
-    from sky_music.parser import parse_song_file
-    from sky_music.scheduler import build_key_actions
-    from sky_music.backend import WinSendInputBackend, DryRunBackend
-    from sky_music.playback import PlaybackEngine
-    from ui import ProgressRenderer
+    from sky_music.domain.parser import parse_song_file
+    from sky_music.domain.scheduler import build_key_actions
+    from sky_music.infrastructure.backend import WinSendInputBackend, DryRunBackend
+    from sky_music.orchestration.engine import PlaybackEngine
+    from sky_music.ui.hud import ProgressRenderer
 
     try:
         song = parse_song_file(selected_song)
@@ -265,54 +408,155 @@ def play_selected_song(
         print(f"Failed to parse song: {exc}")
         return PLAYBACK_QUIT
 
+    # Extract overrides
+    force_dry_run = overrides.dry_run if overrides else False
+    force_profile = overrides.profile if overrides else None
+    force_tempo   = overrides.tempo   if overrides else None
+    force_fps     = overrides.fps     if overrides else None
+
     is_dry_run = DRY_RUN_MODE or force_dry_run
     # Picker decision overrides global config (advisory-only flow)
     current_profile = force_profile if force_profile is not None else TIMING_PROFILE_NAME
     current_tempo   = force_tempo   if force_tempo   is not None else TEMPO_SCALE
 
     # Build scheduled actions using specified TimingPolicy and selected mode
-    sched_meta = build_key_actions(song, policy=TIMING_POLICY, scan_code_mode=CURRENT_SCAN_CODE_MODE, tempo_scale=current_tempo)
+    from sky_music.domain.scheduler_types import TimingPolicy
+    from sky_music.infrastructure.timing import SleepPolicy
+    active_policy = TIMING_POLICY
+    active_sleep_policy = SLEEP_POLICY
+    
+    if force_profile is not None:
+        active_policy = TimingPolicy.from_profile_name(force_profile)
+        # Look up spin_threshold_us for the forced profile
+        profile_key = force_profile.lower().replace("-", "_")
+        user_cfg = load_config()
+        if profile_key in user_cfg.timing_profiles:
+            spin_us = user_cfg.timing_profiles[profile_key].get("spin_threshold_us", 500)
+        else:
+            from sky_music.config import DEFAULT_TIMING_PROFILES
+            spin_us = DEFAULT_TIMING_PROFILES.get(profile_key, {}).get("spin_threshold_us", 500)
+        active_sleep_policy = SleepPolicy(
+            spin_threshold_us=spin_us,
+            poll_s=0.025
+        )
+
+    import sys
+    resolver = None
+    if sys.platform == "win32":
+        from sky_music.platform.win32.keycodes import Win32NoteResolver
+        from sky_music.layouts import SKY_15_KEY_PROFILE
+        resolver = Win32NoteResolver(SKY_15_KEY_PROFILE)
+
+    def check_and_abort_violations(violations_tuple, is_dry_run_flag) -> bool:
+        if not violations_tuple:
+            return True
+        fatal_violations = [v for v in violations_tuple if v.code in ("negative_timestamp", "duplicate_down", "stuck_keys")]
+        if fatal_violations and not is_dry_run_flag:
+            print("\n[FATAL] Real Playback aborted due to severe schedule invariant violations:")
+            for violation in fatal_violations:
+                print(f"  - [{violation.code}] {violation.message}")
+            print("  Please try choosing a safer Timing Profile or decrease --tempo-scale.")
+            return False
+        return True
+
+    sched_meta = build_key_actions(
+        song, policy=active_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
+        resolver=resolver, tempo_scale=current_tempo
+    )
     actions = sched_meta.actions
 
+    # Run Schedule Invariant Validator
+    from sky_music.domain.validation import validate_key_actions
+    violations = validate_key_actions(actions)
+    if violations:
+        print("\n[Warning] Schedule Invariant Violations detected:")
+        for violation in violations:
+            print(f"  - [{violation.code}] {violation.message}")
+        if not check_and_abort_violations(violations, is_dry_run):
+            return PLAYBACK_QUIT
+
     # Pre-playback schedule risk analysis (advisory only — do NOT auto-apply)
-    from sky_music.analyzer import analyze_schedule
-    report = analyze_schedule(sched_meta)
+    from sky_music.domain.analyzer import analyze_schedule
+    report = analyze_schedule(sched_meta, raw_notes=song.notes)
 
     # If picker already decided (force_profile/tempo supplied), skip the prompt
     if report.severity != "low" and force_profile is None and force_tempo is None:
-        should_continue, new_profile, new_tempo = _handle_risk_analysis(
-            report, song, is_dry_run, controls
-        )
-        if not should_continue:
-            return PLAYBACK_QUIT
+        user_cfg = load_config()
+        should_prompt = True
+        if report.severity == "medium" and not user_cfg.safety.prompt_on_medium_risk:
+            should_prompt = False
+        elif report.severity == "high" and not user_cfg.safety.prompt_on_high_risk:
+            should_prompt = False
+
+        if should_prompt:
+            should_continue, new_profile, new_tempo = _handle_risk_analysis(
+                report, song, is_dry_run, controls
+            )
+            if not should_continue:
+                return PLAYBACK_QUIT
+        else:
+            # Still print the advisory report to the console for user awareness, but do not block
+            print(f"\n[Advisory Warning] Playback risk is {report.severity.upper()}:")
+            for rec in report.recommendations:
+                print(f"  * {rec}")
+            print("Proceeding automatically as configured by safety rules.\n")
+            should_continue = True
+            new_profile, new_tempo = None, None
         if new_profile is not None and new_profile != current_profile:
             # Rebuild schedule with the switched profile
-            from sky_music.scheduler import TimingPolicy
-            profile_map = {
-                "local-precise": TimingPolicy.local_precise,
-                "remote-safe": TimingPolicy.remote_safe,
-                "dense-safe": TimingPolicy.dense_safe,
-            }
-            if new_profile in profile_map:
-                new_policy = profile_map[new_profile]()
+            new_policy = TimingPolicy.from_profile_name(new_profile)
+            active_policy = new_policy
+            
+            # Switch SleepPolicy corresponding to the dynamically chosen profile
+            profile_key = new_profile.lower().replace("-", "_")
+            user_cfg = load_config()
+            if profile_key in user_cfg.timing_profiles:
+                new_spin = user_cfg.timing_profiles[profile_key].get("spin_threshold_us", 500)
             else:
-                new_policy = TIMING_POLICY
-            sched_meta = build_key_actions(song, policy=new_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE, tempo_scale=current_tempo)
+                from sky_music.config import DEFAULT_TIMING_PROFILES
+                new_spin = DEFAULT_TIMING_PROFILES.get(profile_key, {}).get("spin_threshold_us", 500)
+            active_sleep_policy = SleepPolicy(
+                spin_threshold_us=new_spin,
+                poll_s=0.025
+            )
+            
+            sched_meta = build_key_actions(
+                song, policy=new_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
+                resolver=resolver, tempo_scale=current_tempo
+            )
             actions = sched_meta.actions
             current_profile = new_profile
+            
+            violations = validate_key_actions(actions)
+            if violations:
+                print("\n[Warning] Schedule Invariant Violations detected after profile change:")
+                for violation in violations:
+                    print(f"  - [{violation.code}] {violation.message}")
+                if not check_and_abort_violations(violations, is_dry_run):
+                    return PLAYBACK_QUIT
+                    
         if new_tempo is not None:
-            sched_meta = build_key_actions(song, policy=TIMING_POLICY, scan_code_mode=CURRENT_SCAN_CODE_MODE, tempo_scale=new_tempo)
+            sched_meta = build_key_actions(
+                song, policy=active_policy, scan_code_mode=CURRENT_SCAN_CODE_MODE,
+                resolver=resolver, tempo_scale=new_tempo
+            )
             actions = sched_meta.actions
             current_tempo = new_tempo
+            
+            violations = validate_key_actions(actions)
+            if violations:
+                print("\n[Warning] Schedule Invariant Violations detected after tempo change:")
+                for violation in violations:
+                    print(f"  - [{violation.code}] {violation.message}")
+                if not check_and_abort_violations(violations, is_dry_run):
+                    return PLAYBACK_QUIT
 
     # Preflight check and window readiness
-    if not _mini_preflight(is_dry_run):
+    if not _mini_preflight(is_dry_run, profile=current_profile, tempo=current_tempo, controls=controls):
         return PLAYBACK_QUIT
 
     # Check window/readiness only if we are NOT running dry-run mode
     if not is_dry_run:
-        if controls is not None and controls.enabled:
-            print(f"  Controls: {controls.hint()}")
         countdown_before_playback(countdown_seconds)
     else:
         print(f"[simulation] DRY-RUN enabled. Simulating playback of {song.name}...")
@@ -334,7 +578,10 @@ def play_selected_song(
         telemetry_enabled=TELEMETRY_CSV_ENABLED or PLAYBACK_DEBUG or force_dry_run,
         require_focus=not is_dry_run,
         profile_name=current_profile,
-        tempo_scale=current_tempo
+        tempo_scale=current_tempo,
+        fps=force_fps,
+        sleep_policy=active_sleep_policy,
+        focus_restore_grace_us=active_policy.focus_restore_grace_us
     )
     result = engine.play()
     # P3: post-run summary
@@ -379,16 +626,16 @@ def build_arg_parser():
     timing = parser.add_argument_group("Playback timing")
     timing.add_argument(
         "--timing-profile",
-        choices=["fast", "balanced", "conservative", "local-precise", "remote-safe", "dense-safe"],
+        choices=[
+            "local-precise", "balanced", "remote-safe", "dense-safe"
+        ],
         default="balanced",
         help=(
             "Timing profile: "
             "local-precise (low latency), "
             "remote-safe (listener quality), "
             "dense-safe (many chords/repeats), "
-            "fast (experimental), "
-            "balanced (default), "
-            "conservative (safe/slower)"
+            "balanced (default)"
         ),
     )
     timing.add_argument(
@@ -396,6 +643,12 @@ def build_arg_parser():
         type=float,
         default=1.0,
         help="Scale playback tempo: 1.2 = 20%% faster, 0.8 = 20%% slower (default: 1.0)",
+    )
+    timing.add_argument(
+        "--fps",
+        type=int,
+        default=60,
+        help="Target FPS for frame-aware timing scaling (default: 60)",
     )
     timing.add_argument(
         "--hold-ms",
@@ -408,6 +661,11 @@ def build_arg_parser():
         help="Override minimum key hold duration in ms (overrides profile)",
     )
     timing.add_argument(
+        "--min-scheduled-hold-ms",
+        type=int,
+        help="Override minimum scheduled hold duration in ms (overrides profile)",
+    )
+    timing.add_argument(
         "--release-gap-ms",
         type=int,
         help="Override release gap in ms (overrides profile)",
@@ -418,10 +676,35 @@ def build_arg_parser():
         help="Override same-key repeat gap in ms (overrides profile)",
     )
     timing.add_argument(
+        "--input-lead-ms",
+        type=int,
+        help="Override input lead duration in ms (overrides profile)",
+    )
+    timing.add_argument(
+        "--chord-merge-window-ms",
+        type=int,
+        help="Override chord merge tolerance window in ms (overrides profile)",
+    )
+    timing.add_argument(
+        "--spin-threshold-us",
+        type=int,
+        help="Override CPU spin threshold in microseconds (precise=800, balanced=500, battery_safe=200/0) (overrides profile)",
+    )
+    timing.add_argument(
+        "--focus-restore-grace-ms",
+        type=int,
+        help="Override focus restoration grace period in ms (precise=50, balanced=100, remote/safe=150-200) (overrides profile)",
+    )
+    timing.add_argument(
         "--scan-code-mode",
         choices=["physical", "mapped"],
         default="physical",
         help="physical = fixed QWERTY scan codes (default), mapped = OS keyboard layout",
+    )
+    timing.add_argument(
+        "--same-key-conflict-policy",
+        choices=["degraded", "strict"],
+        help="degraded = warn and compress timing (default), strict = reject and abort playback",
     )
 
     # ── Runtime Controls ──────────────────────────────────────────────────────
@@ -534,10 +817,12 @@ def build_arg_parser():
     return parser
 
 def configure_from_args(args: argparse.Namespace) -> None:
-    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
-    import inputs
-    import songs
-    from sky_music.scheduler import TimingPolicy
+    global PLAYBACK_DEBUG, DEBUG_LOG_PATH, CURRENT_SCAN_CODE_MODE, TIMING_POLICY, SLEEP_POLICY, TELEMETRY_CSV_ENABLED, DRY_RUN_MODE, TEMPO_SCALE, TIMING_PROFILE_NAME, VERBOSE_HUD
+    from sky_music.platform.win32 import inputs
+    from sky_music.ui import picker as songs
+    from sky_music.domain.scheduler_types import TimingPolicy
+    from sky_music.config import load_config
+    from sky_music.infrastructure.timing import SleepPolicy
 
     CURRENT_SCAN_CODE_MODE = args.scan_code_mode
     songs.SONG_DIR = args.songs_dir
@@ -546,53 +831,87 @@ def configure_from_args(args: argparse.Namespace) -> None:
     TELEMETRY_CSV_ENABLED = args.debug_csv
     DRY_RUN_MODE = args.dry_run
     TEMPO_SCALE = args.tempo_scale
+    if TEMPO_SCALE <= 0:
+        raise ValueError("tempo_scale must be > 0")
     TIMING_PROFILE_NAME = args.timing_profile
     VERBOSE_HUD = args.verbose_hud
 
     if PLAYBACK_DEBUG:
         init_debug_log()
 
-    # Determine base TimingPolicy from profile
+    # Determine base TimingPolicy from persistent profile in config or fallbacks
     profile = args.timing_profile.lower().replace("-", "_")
-    if profile == "local_precise":
-        policy = TimingPolicy.local_precise()
-    elif profile == "remote_safe":
-        policy = TimingPolicy.remote_safe()
-    elif profile == "dense_safe":
-        policy = TimingPolicy.dense_safe()
-    elif profile == "fast":
-        policy = TimingPolicy(
-            hold_us=16_000,
-            min_hold_us=8_000,
-            release_gap_us=2_000,
-            repeat_release_gap_us=2_000
-        )
-    elif profile == "conservative":
-        policy = TimingPolicy(
-            hold_us=34_000,
-            min_hold_us=16_000,
-            release_gap_us=5_000,
-            repeat_release_gap_us=3_000
-        )
-    else: # balanced
-        policy = TimingPolicy(
-            hold_us=24_000,
-            min_hold_us=12_000,
-            release_gap_us=3_000,
-            repeat_release_gap_us=2_000
-        )
+    user_cfg = load_config()
+    
+    if profile in user_cfg.timing_profiles:
+        p_dict = user_cfg.timing_profiles[profile]
+    else:
+        fallback_profile = user_cfg.default_timing_profile.lower().replace("-", "_")
+        p_dict = user_cfg.timing_profiles.get(fallback_profile, user_cfg.timing_profiles["balanced"])
+        
+    base_spin_threshold_us = p_dict.get("spin_threshold_us", 500)
+    policy = TimingPolicy(
+        hold_us=p_dict.get("hold_us", 24_000),
+        min_hold_us=p_dict.get("min_hold_us", 12_000),
+        release_gap_us=p_dict.get("release_gap_us", 3_000),
+        repeat_release_gap_us=p_dict.get("repeat_release_gap_us", 2_000),
+        min_scheduled_hold_us=p_dict.get("min_scheduled_hold_us", 500),
+        input_lead_us=p_dict.get("input_lead_us", 0),
+        chord_merge_window_us=p_dict.get("chord_merge_window_us", 0),
+        focus_restore_grace_us=p_dict.get("focus_restore_grace_us", 100_000),
+        same_key_conflict_policy=p_dict.get("same_key_conflict_policy", "degraded")
+    )
 
     # Perform overrides from arguments
     hold_us = args.hold_ms * 1000 if args.hold_ms is not None else policy.hold_us
     min_hold_us = args.min_hold_ms * 1000 if args.min_hold_ms is not None else policy.min_hold_us
     release_gap_us = args.release_gap_ms * 1000 if args.release_gap_ms is not None else policy.release_gap_us
     repeat_release_gap_us = args.repeat_release_gap_ms * 1000 if args.repeat_release_gap_ms is not None else policy.repeat_release_gap_us
+    input_lead_us = getattr(args, "input_lead_ms", None)
+    if input_lead_us is not None:
+        input_lead_us = input_lead_us * 1000
+    else:
+        input_lead_us = policy.input_lead_us
+        
+    chord_merge_window_us = getattr(args, "chord_merge_window_ms", None)
+    if chord_merge_window_us is not None:
+        chord_merge_window_us = chord_merge_window_us * 1000
+    else:
+        chord_merge_window_us = policy.chord_merge_window_us
+
+    spin_threshold_us = getattr(args, "spin_threshold_us", None)
+    if spin_threshold_us is None:
+        spin_threshold_us = base_spin_threshold_us
+
+    focus_restore_grace_us = getattr(args, "focus_restore_grace_ms", None)
+    if focus_restore_grace_us is not None:
+        focus_restore_grace_us = focus_restore_grace_us * 1000
+    else:
+        focus_restore_grace_us = policy.focus_restore_grace_us
     
+    min_scheduled_hold_us = getattr(args, "min_scheduled_hold_ms", None)
+    if min_scheduled_hold_us is not None:
+        min_scheduled_hold_us = min_scheduled_hold_us * 1000
+    else:
+        min_scheduled_hold_us = policy.min_scheduled_hold_us
+
+    same_key_conflict_policy = args.same_key_conflict_policy if args.same_key_conflict_policy is not None else policy.same_key_conflict_policy
+
     TIMING_POLICY = TimingPolicy(
         hold_us=hold_us,
         min_hold_us=min_hold_us,
         release_gap_us=release_gap_us,
-        repeat_release_gap_us=repeat_release_gap_us
+        repeat_release_gap_us=repeat_release_gap_us,
+        min_scheduled_hold_us=min_scheduled_hold_us,
+        input_lead_us=input_lead_us,
+        chord_merge_window_us=chord_merge_window_us,
+        focus_restore_grace_us=focus_restore_grace_us,
+        same_key_conflict_policy=same_key_conflict_policy
+    )
+
+    SLEEP_POLICY = SleepPolicy(
+        spin_threshold_us=spin_threshold_us,
+        poll_s=0.025
     )
 
     if args.sky_process_names:
@@ -646,13 +965,15 @@ def prompt_song_selection(
     profile: str = "balanced",
     tempo: float = 1.0,
     dry_run: bool = False,
-) -> "songs.SongPickerResult | None":
-    import songs
+    fps: int | None = None,
+) -> "SongPickerResult | None":
+    from sky_music.ui import picker as songs
     if songs.HAS_PROMPT_TOOLKIT:
         return songs.choose_song_interactively(
             initial_profile=profile,
             initial_tempo=tempo,
             initial_dry_run=dry_run,
+            initial_fps=fps,
         )
 
     # Fallback CLI mode (no prompt_toolkit)
@@ -678,6 +999,7 @@ def prompt_song_selection(
                 action="dry_run" if dry_run else "play",
                 profile_name=profile,
                 tempo_scale=tempo,
+                fps=fps,
             )
         print("")
 
@@ -712,12 +1034,12 @@ def main() -> int:
         parser.error(str(exc))
 
     if args.inspect_telemetry is not None:
-        from sky_music.telemetry import inspect_telemetry_report
+        from sky_music.orchestration.telemetry import inspect_telemetry_report
         inspect_telemetry_report(args.inspect_telemetry)
         return 0
 
     if args.doctor or args.doctor_timing or args.doctor_input:
-        import sky_music.doctor as doctor
+        import sky_music.infrastructure.doctor as doctor
         if args.doctor:
             doctor.run_all_doctor_checks()
         elif args.doctor_timing:
@@ -762,7 +1084,17 @@ def main() -> int:
                     print(f"Run {run_index + 1}/{repeat_count}: {selected_song.stem}")
                 if not args.no_clear:
                     clear_terminal()
-                result = play_selected_song(selected_song, args.countdown, controls=controls)
+                result = play_selected_song(
+                    selected_song,
+                    args.countdown,
+                    controls=controls,
+                    overrides=PlaybackOverrides(
+                        dry_run=DRY_RUN_MODE,
+                        profile=TIMING_PROFILE_NAME,
+                        tempo=TEMPO_SCALE,
+                        fps=getattr(args, "fps", None)
+                    )
+                )
                 if result == PLAYBACK_QUIT:
                     return 0
                 if result == PLAYBACK_SKIPPED:
@@ -774,6 +1106,7 @@ def main() -> int:
                 profile=TIMING_PROFILE_NAME,
                 tempo=TEMPO_SCALE,
                 dry_run=DRY_RUN_MODE,
+                fps=getattr(args, "fps", None)
             )
             if picker_result is None:
                 return 0
@@ -786,9 +1119,12 @@ def main() -> int:
                 picker_result.song_path,
                 args.countdown,
                 controls=controls,
-                force_dry_run=force_dry,
-                force_profile=picker_result.profile_name,
-                force_tempo=picker_result.tempo_scale,
+                overrides=PlaybackOverrides(
+                    dry_run=force_dry,
+                    profile=picker_result.profile_name,
+                    tempo=picker_result.tempo_scale,
+                    fps=picker_result.fps,
+                )
             )
             if result == PLAYBACK_QUIT:
                 return 0
