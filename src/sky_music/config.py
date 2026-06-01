@@ -80,6 +80,16 @@ class FrameTimingDefaults:
         }
 
 
+# ==============================================================================
+# ⚠️ ATTENTION DEVELOPERS & AI ASSISTANTS:
+# Before modifying or creating new timing profiles, you MUST read and adhere
+# to the constraints defined in `docs/timing-principles.md`.
+#
+# Critical mathematical constraint for game engine input polling at 60fps:
+#   The Cycle Rule: (min_hold_us + repeat_release_gap_us) MUST be > 16667 us.
+#   Failure to meet this will cause dropped note repeats (squashed frames).
+# ==============================================================================
+
 DEFAULT_TIMING_PROFILES: dict[str, dict[str, Any]] = {
     "local_precise": {
         "hold_us": 20000,
